@@ -344,7 +344,14 @@ class _LlmProposerBase:
                 "grammar above; pick `severity_hint` deliberately per the "
                 "criteria there. A one-sentence rationale ('200 vs 401, "
                 "hence auth bypass') is insufficient — the operator reads "
-                "this field to decide whether to promote the Candidate.\n\n"
+                "this field to decide whether to promote the Candidate. "
+                "The `rationale` field MUST be a non-empty string with all "
+                "four sections inline; emitting `null`, an empty string, or "
+                "omitting the field fails Pydantic validation and the "
+                "action is silently dropped — your hypothesize won't make "
+                "it into the corpus. If you don't have enough context to "
+                "write a substantive rationale, propose another `request` "
+                "or `probe` instead and gather more evidence first.\n\n"
             )
         return (
             f"{objective_block}"
