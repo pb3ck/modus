@@ -29,6 +29,10 @@ Every ADR has the following sections:
 - [`0001-typed-action-vocabulary.md`](./0001-typed-action-vocabulary.md)
   — actions are drawn from a typed grammar and validated by an
   SMT solver before dispatch.
+- [`0002-autonomous-loop-and-verifier-driven-search.md`](./0002-autonomous-loop-and-verifier-driven-search.md)
+  — Modus is an autonomous loop; the proposer samples N actions
+  per step, the SMT layer prunes the inconsistent ones, and the
+  prompt is structured for cache friendliness.
 
 ## When to write an ADR
 

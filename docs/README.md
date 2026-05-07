@@ -21,19 +21,28 @@ roughly grouped as follows:
 - [`adr/0001-typed-action-vocabulary.md`](./adr/0001-typed-action-vocabulary.md)
   — the foundational architectural decision: actions are typed
   rather than free-form.
+- [`adr/0002-autonomous-loop-and-verifier-driven-search.md`](./adr/0002-autonomous-loop-and-verifier-driven-search.md)
+  — the loop shape: autonomous, verifier-driven N-sampling with
+  SMT pruning, prompt-cache-aware context engineering.
+- [`corpus-interface.md`](./corpus-interface.md) — the contract
+  Modus places on its corpus substrate, pinned to Quarry's MCP
+  surface.
 
 ## Planned documents
 
 The following documents are referenced from the README or the
 roadmap and will be written as the corresponding code lands:
 
-- `corpus-interface.md` — specification of the MCP tool surface
-  Modus expects from a corpus substrate.
 - `action-vocabulary.md` — reference for every action type, its
   preconditions, its effect on the corpus, and its consistency
   rules.
 - `consistency-checks.md` — the SMT formulation Modus uses to
-  validate proposed actions.
-- `quickstart.md` — operator-facing install and first-run guide.
-- `methodology.md` — how Modus expects to be used in a real
-  bounty workflow, including the human-in-the-loop seam.
+  validate proposed actions, with worked examples per action
+  type.
+- `proposer.md` — the verifier-driven sampling loop in detail:
+  prompt zones, sample budget, pruning, value heuristics.
+- `quickstart.md` — operator-facing install and first-run guide,
+  including how to point Modus at an existing Quarry corpus.
+- `methodology.md` — how Modus expects to fit into a real bounty
+  workflow, including the operator's review loop after a session
+  ends.

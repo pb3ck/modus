@@ -1,0 +1,201 @@
+"""Typed action vocabulary.
+
+Each :class:`Action` is a Pydantic model with a ``kind`` discriminator
+field. The :data:`Action` alias is the discriminated union over every
+action type Modus knows about; the LLM proposer emits values of this
+type via provider-native structured output, so the proposer's output
+is grammatical against this module by construction.
+
+The preconditions for each action live alongside the action type.
+:mod:`modus.consistency` walks an :class:`Action` and asks each
+variant for its preconditions, then encodes them as Z3 constraints
+against the current corpus state.
+
+This module is the canonical reference for the action grammar. ADR
+0001 commits to "actions are typed"; ADR 0002 commits to "the
+proposer samples ``N`` candidate actions and the consistency layer
+prunes them." Both depend on this file being the single source of
+truth.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# A reference to a corpus row. Quarry uses UUIDv7 strings; Modus
+# treats them as opaque tokens.
+CorpusRef = Annotated[str, Field(min_length=1, max_length=64)]
+
+# An asset — typically a hostname. Modus does not validate the
+# hostname format here; that's the scope policy's job. We do reject
+# the obviously bad shapes.
+Asset = Annotated[str, Field(min_length=1, max_length=255)]
+
+
+class _ActionBase(BaseModel):
+    """Shared configuration for every action variant.
+
+    The ``model_config`` settings make every action immutable
+    (frozen) so the same proposed action can be safely shared
+    between the consistency check and the executor without any
+    risk of one mutating it under the other.
+    """
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+
+class Probe(_ActionBase):
+    """Passive observation of a target asset.
+
+    A ``Probe`` reads what the corpus already knows about the
+    target — the most recent httpx record, the current jsbundle
+    catalogue, the endpoint list. It does not generate network
+    traffic of its own; that's :class:`Request`.
+
+    Preconditions:
+      * ``target`` is in scope.
+    """
+
+    kind: Literal["probe"] = "probe"
+    target: Asset
+    aspect: Literal["httpx", "jsbundle", "endpoints", "tech"] = "httpx"
+
+
+class Request(_ActionBase):
+    """Active HTTP request to a target asset.
+
+    Generates one HTTP request and persists the resulting
+    request/response pair as an observation. Method must be in
+    the operator-approved set for the session; the consistency
+    layer enforces this.
+
+    Preconditions:
+      * ``target`` is in scope.
+      * ``method`` is in the session's allowed-methods set.
+    """
+
+    kind: Literal["request"] = "request"
+    target: Asset
+    method: Literal["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    path: str = Field(min_length=1, max_length=4096)
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _path_starts_with_slash(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("path must start with '/'")
+        return value
+
+
+class Compare(_ActionBase):
+    """Structural diff between two existing observations.
+
+    Surfaces what changed between two observations of the same
+    asset (or across two different assets, depending on the
+    dimensions). Produces a comparison row in the corpus.
+
+    Preconditions:
+      * ``observation_a`` and ``observation_b`` are both in the
+        corpus.
+      * The two observations are distinct.
+    """
+
+    kind: Literal["compare"] = "compare"
+    observation_a: CorpusRef
+    observation_b: CorpusRef
+    dimensions: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("dimensions")
+    @classmethod
+    def _dimensions_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("dimensions must be unique")
+        return value
+
+
+class Differential(_ActionBase):
+    """Differential test across observations along a single dimension.
+
+    The bug-class oracle for IDOR / auth-bypass shapes: same path,
+    different identity (or no identity), same response shape ⇒
+    something is off. Encodes more structure than a generic
+    :class:`Compare` because the dimension determines what counts
+    as evidence for a given bug class.
+
+    Preconditions:
+      * Every observation in ``observations`` exists in the corpus.
+      * At least two observations are provided.
+    """
+
+    kind: Literal["differential"] = "differential"
+    observations: tuple[CorpusRef, ...] = Field(min_length=2, max_length=8)
+    dimension: Literal["identity", "auth", "role", "tenant"]
+    bug_class: Literal["idor", "auth_bypass", "tenant_isolation"]
+
+
+class Annotate(_ActionBase):
+    """Attach an operator-visible note to a corpus row.
+
+    Notes are FTS-indexed and surface in subsequent searches. The
+    referent can be a Target, an Asset, an Evidence row, or an
+    observation — anything Quarry already models.
+
+    Preconditions:
+      * ``referent`` exists in the corpus.
+      * ``note`` is non-empty.
+    """
+
+    kind: Literal["annotate"] = "annotate"
+    referent: CorpusRef
+    note: str = Field(min_length=1, max_length=8192)
+
+
+class Hypothesize(_ActionBase):
+    """Propose a Candidate of a given bug class.
+
+    The terminal action — every successful Modus session ends with
+    one or more ``Hypothesize`` actions. The Candidate row that
+    results is what the operator promotes (or doesn't) via Quarry's
+    own ``quarry finding promote`` lifecycle. Modus has no
+    ``Promote`` action and never will.
+
+    Preconditions:
+      * Every entry in ``evidence_refs`` exists in the corpus.
+      * ``rationale`` is non-empty.
+    """
+
+    kind: Literal["hypothesize"] = "hypothesize"
+    bug_class: str = Field(min_length=1, max_length=64)
+    evidence_refs: tuple[CorpusRef, ...] = Field(min_length=1, max_length=32)
+    rationale: str = Field(min_length=1, max_length=4096)
+    severity_hint: Literal["info", "low", "medium", "high", "critical"] = "info"
+
+
+# The discriminated union. Pydantic dispatches on the ``kind`` field;
+# adding a new action type means adding it to this union and
+# extending :mod:`modus.consistency`.
+Action = Annotated[
+    Probe | Request | Compare | Differential | Annotate | Hypothesize,
+    Field(discriminator="kind"),
+]
+
+
+__all__ = [
+    "Action",
+    "Annotate",
+    "Asset",
+    "Compare",
+    "CorpusRef",
+    "Differential",
+    "Hypothesize",
+    "Probe",
+    "Request",
+]
