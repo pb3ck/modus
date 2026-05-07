@@ -322,7 +322,10 @@ class _LlmProposerBase:
         )
         closing_block = ""
         if context.bug_classes:
+            from modus.evidence_patterns import render_patterns
+
             classes = ", ".join(context.bug_classes)
+            patterns_block = render_patterns(context.bug_classes)
             closing_block = (
                 "# Closing rule (read this every step)\n\n"
                 f"You are testing for: {classes}. If the recent action history "
@@ -330,25 +333,17 @@ class _LlmProposerBase:
                 "your NEXT action MUST be a `hypothesize` action — do NOT propose "
                 "more `request` or `probe` actions. Reference the relevant "
                 "observation IDs (the `obs=...` values shown in history) in the "
-                "`evidence_refs` list. Concrete examples of evidence:\n"
-                "- auth_bypass: a `request` with a SQL-injection-shaped or "
-                "auth-bypass-shaped input that returns HTTP 200 with an auth "
-                "token (JWT, session cookie) when a baseline request with the "
-                "same endpoint and benign input returned 401/403.\n"
-                "- idor: two `request` observations to the same path-shaped "
-                "URL with different identifiers where the response bodies show "
-                "data belonging to a different user/tenant.\n"
-                "- info_disclosure: a `request` returning HTTP 200 with a "
-                "body containing secrets, keys, version metadata, source "
-                "files, or directory listings the application shouldn't "
-                "expose.\n"
+                "`evidence_refs` list.\n\n"
+                f"{patterns_block}\n"
                 "When evidence is present, close the loop. Compose the "
                 "`rationale` per the four-section format (Vulnerability / "
                 "Exploit / Evidence / Impact) spelled out in the action "
                 "grammar above; pick `severity_hint` deliberately per the "
-                "criteria there. A one-sentence rationale ('200 vs 401, "
-                "hence auth bypass') is insufficient — the operator reads "
-                "this field to decide whether to promote the Candidate. "
+                "canonical-instance default in the recognition template "
+                "above (and shift up or down per the severity notes). A "
+                "one-sentence rationale ('200 vs 401, hence auth bypass') "
+                "is insufficient — the operator reads this field to "
+                "decide whether to promote the Candidate. "
                 "The `rationale` field MUST be a non-empty string with all "
                 "four sections inline; emitting `null`, an empty string, or "
                 "omitting the field fails Pydantic validation and the "
