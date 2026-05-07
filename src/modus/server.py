@@ -157,6 +157,17 @@ def _autonomous_tool_schemas() -> dict[str, dict[str, Any]]:
                     "items": {"type": "string"},
                     "description": "Bug classes to focus the search on.",
                 },
+                "objective": {
+                    "type": "string",
+                    "description": (
+                        "Free-form natural-language framing for the agent's "
+                        "internal proposer. Use this to convey context the "
+                        "scope policy can't carry: the lab's URL and port, "
+                        "the test credentials, the relevant API surface, the "
+                        "operator's hypothesis to test. Optional; a generic "
+                        "default is used when omitted."
+                    ),
+                },
                 "budget": {
                     "type": "object",
                     "description": "Optional budget override for the loop.",
@@ -595,6 +606,10 @@ class ModusServer:
 
         target = str(arguments.get("target") or self.session.scope.target_name)
         bug_classes = list(arguments.get("bug_classes") or [])
+        objective_arg = arguments.get("objective")
+        objective: str | None = (
+            str(objective_arg) if isinstance(objective_arg, str) and objective_arg else None
+        )
         budget_args = dict(arguments.get("budget") or {})
         budget = Budget(
             max_steps=int(budget_args.get("max_steps", Budget().max_steps)),
@@ -607,7 +622,7 @@ class ModusServer:
             execute_action=self._execute_action_for_loop,
             budget=budget,
         )
-        record = await loop.run(target_name=target, bug_classes=bug_classes)
+        record = await loop.run(target_name=target, bug_classes=bug_classes, objective=objective)
         return {
             "session": record.to_payload(),
             "candidates": [
