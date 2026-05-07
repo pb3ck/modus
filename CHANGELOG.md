@@ -82,6 +82,39 @@ notice.
 - New `docs/mcp-host-integration.md` covers operator-facing
   setup for Claude Desktop, Claude Code, and other MCP-aware
   hosts.
+- M3 (MCP server with verified-action surface, Quarry
+  passthroughs, and registered-but-not-yet-implemented
+  autonomous-session tools) lands. New modules:
+  - `src/modus/server.py` — the MCP server, registering 18
+    tools (6 verified-action + 10 Quarry-passthrough + 2
+    autonomous-session). Each verified-action call is Z3-gated
+    before any side effect; rejection surfaces the failed
+    precondition names back to the host.
+  - `src/modus/session.py` — per-MCP-server state:
+    `LlmProviderConfig.from_env`, `ServerSession` (immutable
+    scope, lazy Quarry connection, in-memory observation and
+    Candidate pools), `SessionObservation`, `SessionCandidate`.
+    Quarry's MCP surface is read-only at v0.1, so observations
+    Modus produces during a session live in this in-memory
+    pool until the operator ingests them out of band.
+  - `src/modus/executor.py` — async HTTP executor for the
+    `Request` action. Handles network-level failures defensively
+    (captures into the observation's `error` field) and
+    truncates non-text response bodies at 64 KB so MCP results
+    stay reasonable.
+- New `modus mcp --scope <path>` CLI subcommand replaces the
+  old `modus run` stub. Accepts `MODUS_SCOPE_PATH` from env as
+  an alternative to the flag.
+- New `pytest -m integration` marker scope covers the corpus
+  client; the M3 server's contract tests run against a fake
+  corpus and a recording HTTP transport without standing up an
+  MCP transport.
+
+### Removed
+
+- The `modus run` CLI subcommand stub, replaced by `modus mcp`.
+  Operators no longer drive Modus from the CLI; they drive it
+  through their MCP host (Claude Desktop primarily).
 
 ### Changed
 

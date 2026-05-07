@@ -109,21 +109,18 @@ class TestActionValidate:
         assert result.exit_code == 2
 
 
-class TestRunCommand:
-    def test_run_is_stub(self, tmp_path: Path) -> None:
-        scope = tmp_path / "scope.json"
-        scope.write_text(
-            json.dumps(
-                {
-                    "target_name": "demo",
-                    "allowed_assets": ["a.example.com"],
-                    "allowed_methods": ["GET"],
-                }
-            )
-        )
+class TestMcpCommand:
+    def test_help_lists_mcp_subcommand(self) -> None:
         runner = CliRunner()
-        result = runner.invoke(main, ["run", "--target", "demo", "--scope", str(scope)])
-        assert result.exit_code == 2
+        result = runner.invoke(main, ["--help"])
+        assert result.exit_code == 0
+        assert "mcp" in result.output
+
+    def test_mcp_requires_scope(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["mcp"])
+        assert result.exit_code != 0
+        assert "scope" in result.output.lower()
 
 
 class _FakeQuarryClient:

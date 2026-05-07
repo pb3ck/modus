@@ -8,8 +8,9 @@ Subcommands land alongside the milestones in ROADMAP.md:
   and prints a per-action verdict.
 * ``modus corpus status`` — Milestone 2 deliverable; opens a Quarry
   MCP session, prints schema version and per-entity counts, exits.
-* ``modus run`` — Milestone 4 deliverable; launches the autonomous
-  agent loop. Currently a stub that explains what it would do.
+* ``modus mcp --scope <path>`` — Milestone 3 deliverable; starts
+  the Modus MCP server over stdio. Designed to be spawned by an
+  MCP-aware host; not for interactive use.
 """
 
 from __future__ import annotations
@@ -186,24 +187,26 @@ async def _corpus_status(quarry_command: str, timeout_seconds: float, as_json: b
     return 0
 
 
-@main.command("run")
-@click.option("--target", required=True, help="Quarry target name.")
+@main.command("mcp")
 @click.option(
     "--scope",
     "scope_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    envvar="MODUS_SCOPE_PATH",
     help="Path to a scope policy JSON file.",
 )
-def run(target: str, scope_path: Path) -> None:
-    """Run the autonomous agent loop. Stub until Milestone 4."""
-    err_console.print(
-        "[yellow]modus run[/yellow] is a stub at Milestone 0. "
-        "The autonomous loop lands at Milestone 4 — see ROADMAP.md."
-    )
-    err_console.print(f"  target: {target}")
-    err_console.print(f"  scope:  {scope_path}")
-    sys.exit(2)
+def mcp_serve(scope_path: Path) -> None:
+    """Run the Modus MCP server over stdio.
+
+    Speaks JSON-RPC on stdout; logs go to stderr. Designed to be
+    spawned by an MCP-aware host (Claude Desktop, Claude Code,
+    Cursor, etc.) — not to be run interactively. See
+    docs/mcp-host-integration.md for host configuration.
+    """
+    from modus.server import serve
+
+    sys.exit(asyncio.run(serve(scope_path)))
 
 
 def _load_spec(path: Path) -> dict[str, Any]:
