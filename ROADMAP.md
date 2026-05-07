@@ -136,7 +136,71 @@ non-pre-release `0.1.0` tag. 0.1.0a1 ships the docs that *enable*
 that test; whether the docs are sufficient is what subsequent
 alpha releases will refine.
 
-## Beyond v0.1
+## Milestone 6 — Tools-first pivot (0.3.0a1 shipped)
+
+Three milestones — `v0.1.0`, `v0.2.0`, `v0.3.0` on GitHub — landed
+in a single arc as 11 issues / 17 commits since `0.1.0a1`. The
+through-line: Modus is now an autonomous agent with an open tool
+registry, not a closed-grammar agent that handed off recon and
+scanning to the operator. ADR-0004 documents the pivot.
+
+What `0.3.0a1` ships:
+
+- **Open tool registry** — `Tool(name, args)` action variant + a
+  per-`ServerSession` `ToolRegistry` keyed by name. Three
+  invocation backends: `shell` (`subprocess` with placeholder-
+  substituted argv, output capping, per-tool timeouts, scoped
+  env), `builtin` (Modus-internal callables resolved by dotted
+  path), and `mcp` (stub for v0.3; full passthrough is a
+  follow-up). Per-tool preconditions function declared on each
+  spec dispatched through Z3 — adding a new tool is one
+  registry entry, not a `_preconditions` switch edit. Closes
+  v0.3.0 issues #6 / #7 / #8 / #9 / #10 / #11.
+- **Reference shell tools** — `amass.enum` and `nuclei.scan`
+  ship as first-party shell registrations with scope-gating
+  preconditions (domain in `scope.hosts()`; URL's
+  `(host, port, tls)` in `scope.allowed_endpoints`). The agent
+  reaches recon and vuln scanning through the same registry it
+  reaches typed actions.
+- **Async session pattern** — `start_autonomous_session` /
+  `poll_autonomous_session` / `cancel_autonomous_session`
+  escape the host's per-tool-call timeout. Long unattended
+  runs (overnight grinds, multi-step recon) now fit the
+  architecture; the budget bounds wall time, not the
+  transport. Closes v0.2.0 issue #1.
+- **Per-run observation gating** — `Hypothesize.evidence_refs`
+  is constrained to observations the current run produced;
+  cross-run bleed from the process-lifetime observation pool
+  is structurally impossible. Closes v0.1.0 issue #4.
+- **Strict dedup** — duplicate-survivor steps skipped, not
+  re-executed. Closes v0.1.0 issue #2.
+- **Pre-warm LLM at server startup** — cold-load tax for
+  local Ollama models moves out of the operator's first
+  autonomous-session call. Closes v0.1.0 issue #3.
+- **Bug-class evidence pattern library** — eight classes
+  (auth_bypass, idor, info_disclosure, sqli, ssrf, xss, csrf,
+  business_logic) with per-class recognition templates and
+  canonical severity defaults rendered into the proposer's
+  closing-rule block. Smaller models stop defaulting to
+  `severity_hint="info"` on clear `critical` findings. Closes
+  v0.2.0 issue #5.
+- **Submission policy revised** — structural firewall stays
+  (no `submit`-shaped *tool* in the registry, adding one is
+  off-limits, terminal state is a Candidate in storage); the
+  verbal ban on rationales recommending submission is dropped.
+
+Verified live: gemma2:9b on M1 Pro / 16 GB unified producing
+seven distinct Juice Shop Candidates autonomously through the
+MCP host, all four-section rationales, accurate `evidence_refs`,
+correct `severity_hint`.
+
+The non-pre-release `0.3.0` tag still wants the same external-
+operator-without-hand-holding test the 0.1.0 tag does, plus the
+follow-ups documented in ADR-0004 §"Open follow-ups": full
+typed-action subsumption into the registry, real MCP-passthrough
+backend, registry rendering in the proposer's prompt.
+
+## Beyond v0.3
 
 Out of scope for v0.1 and intentionally deferred:
 

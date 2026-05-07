@@ -23,12 +23,12 @@ a Finding is the operator's `quarry finding promote`, run outside
 Modus. Modus may *recommend* submission in a Candidate's rationale —
 the decision and the act remain the operator's.
 
-> **Status: alpha (0.1.0a1).** The autonomous loop runs end-to-end
+> **Status: alpha (0.3.0a1).** The autonomous loop runs end-to-end
 > against authorized targets — see [`docs/quickstart.md`](./docs/quickstart.md).
-> The action vocabulary, the consistency check, the corpus
-> interface, and the submission-line invariant are committed
-> surfaces; everything else may shift between alpha releases until
-> 1.0.
+> The action vocabulary (now an open `ToolRegistry` per ADR-0004),
+> the formal consistency check, the corpus interface, and the
+> submission-line invariant are committed surfaces; everything else
+> may shift between alpha releases until 1.0.
 
 ## What this is
 

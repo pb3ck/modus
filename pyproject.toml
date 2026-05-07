@@ -1,7 +1,7 @@
 [project]
 name = "modus"
-version = "0.1.0a1"
-description = "Autonomous offensive agent built on a typed action vocabulary, formal consistency checking, and a Quarry-backed corpus."
+version = "0.3.0a1"
+description = "Autonomous offensive agent with an open tool registry, formal consistency checking, and a Quarry-backed corpus."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-or-later"

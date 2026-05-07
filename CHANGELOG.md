@@ -10,6 +10,60 @@ notice.
 
 ## [Unreleased]
 
+## [0.3.0a1] — 2026-05-07
+
+Tools-first alpha. The closed v0.1 typed-action vocabulary is
+extended with an open `ToolRegistry` per ADR-0004; the agent
+reaches recon shells (`amass.enum`, `nuclei.scan`), the typed-
+action surface (`probe`, `request`, `compare`, `differential`,
+`annotate`, `hypothesize`), Quarry's analytical and read tools,
+and any operator-declared shell or MCP-passthrough tool. The
+autonomous loop covers recon → exploit → evidence in one
+unbroken run.
+
+The four invariants from ADR-0001 still hold under the new
+shape: typed actions (every emission validated by Pydantic),
+formal consistency check (Z3 dispatches via per-tool
+preconditions), Quarry-backed corpus (default storage; tools
+register as `corpus.*` entries), storage-enforced submission
+line (no `submit`-shaped *tool* in the registry; adding one is
+project-policy off-limits). What changes: the trust boundary
+moves from the action union's discriminator to the registry's
+contents.
+
+Verified live against OWASP Juice Shop on local hardware: full
+recon → exploit → hypothesize cycle through gemma2:9b producing
+seven distinct Candidates with four-section rationales
+(Vulnerability / Exploit / Evidence / Impact) and accurate
+severity_hint selection.
+
+What 0.3.0a1 ships with that 0.1.0a1 didn't:
+
+- 21 always-present MCP tools (was 18) — adds
+  `start_autonomous_session`, `poll_autonomous_session`,
+  `cancel_autonomous_session` (the async session pattern from
+  #1) plus the generic `tool` dispatch surface.
+- Open `ToolRegistry` with eight default builtins (six typed-
+  action + two recon shell), loadable extensions from the scope
+  file's `tools` block.
+- `ToolExecutor` dispatching shell / builtin / mcp-stub backends
+  with output capping, per-tool timeouts, scoped env, and full
+  audit-grade `ToolObservation` records.
+- Per-run observation-id gating on `Hypothesize.evidence_refs`
+  (no cross-run bleed).
+- Strict dedup in the agent loop (duplicate-survivor steps
+  skipped, not re-executed).
+- Pre-warm proposer LLM at server startup (cold-load tax moves
+  out of the operator's first call).
+- Bug-class evidence pattern library covering eight classes with
+  per-class canonical severity defaults — fixes smaller models
+  defaulting to `severity_hint="info"` on clear `critical`
+  findings.
+- Submission policy revised: structural firewall stays, verbal
+  ban dropped — rationales may recommend operator promotion.
+
+The full change set since 0.1.0a1 is catalogued below.
+
 ### Architecture
 
 - **Tools-first action grammar (ADR-0004).** The closed v0.1
