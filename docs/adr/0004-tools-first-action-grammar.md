@@ -100,16 +100,17 @@ default registry. Duplicate names — intra-block or against
 builtins — surface at session construction, not silently at
 dispatch.
 
-## Submission line — preserved structurally
+## Submission line — preserved structurally; promotion is internal
 
 ADR 0002 §4 commits to "the submission line is storage-enforced."
-That commitment is now: **no `submit`, `publish`, `post`, or
-`report` tool exists in the registry, and adding one is
-off-limits.** The default registry never registers them; the
-operator's `tools` block can technically declare anything, but
-adding a submit-shaped tool is a project policy violation
-(equivalent to forking and removing the firewall — possible, not
-supported).
+That commitment is now: **no `submit`, `publish`, `post`,
+`report`, or `report-to-h1` tool exists in the registry, and
+adding one is off-limits.** The default registry never registers
+them; the operator's `tools` block can technically declare
+anything, but adding a submit-shaped tool is a project policy
+violation (equivalent to forking and removing the firewall —
+possible, not supported). Submission of Findings to bug-bounty
+programmes remains the operator's, performed outside Modus.
 
 The "what does this firewall stop" question reframes:
 
@@ -120,8 +121,23 @@ The "what does this firewall stop" question reframes:
   validates at the Pydantic layer; the consistency layer rejects
   with `tool_registered:<name>` if the name isn't registered.
 
-Same guarantee, surfaced through the registry's trust boundary
-rather than the action union's discriminator.
+Same guarantee on external submission, surfaced through the
+registry's trust boundary rather than the action union's
+discriminator.
+
+**Amended 2026-05-07 (v0.4.0):** Candidate→Finding promotion is
+no longer "off-limits for the agent." It's a corpus-internal
+lifecycle close, registered as the `corpus.promote_finding`
+builtin in the default registry (`modus.builtins.corpus.promote_finding`,
+backed by Quarry's MCP `finding_promote` write tool). The
+proposer's closing rule auto-promotes severity-`medium`-or-
+higher Candidates on the step after the originating `hypothesize`.
+The registry's exclusion is on submission to *external* parties
+(bounty platforms), not on writing a Finding row in the local
+corpus. The per-tool precondition gates promotion on the
+Candidate id being in this run's observation pool — cross-run
+promotion remains the operator's `quarry finding promote` CLI
+verb.
 
 ## Consequences
 

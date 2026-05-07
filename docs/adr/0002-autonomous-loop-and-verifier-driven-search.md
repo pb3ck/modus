@@ -25,10 +25,13 @@ operator approving each step — does not match Modus's intent.
 Three things drive a different choice:
 
 1. **Modus is intended to be autonomous.** The agent runs
-   end-to-end without per-step operator approval. The hard human
-   gate sits on the way *out*: Modus writes Candidates, and the
-   operator promotes them via Quarry's `quarry finding promote`.
-   That promotion happens after the session ends, not during it.
+   end-to-end without per-step operator approval. As of v0.4.0
+   the autonomous loop also closes the Candidate→Finding
+   lifecycle — severity-medium-or-higher Candidates promote to
+   Findings via `corpus.promote_finding` inside the loop. The
+   hard human gate moves to bug-bounty submission: Findings stay
+   in Quarry's SQLite, and the operator decides whether to
+   submit them to a programme outside Modus.
 2. **The corpus is Quarry, accessed over MCP.** Long-term memory
    is durable in Quarry's SQLite; sessions bring in only the
    subset of the corpus relevant to the current step. The agent's
@@ -125,34 +128,47 @@ vocabulary or scope. With a 50-step session this is a
 cumulative ~5–10× cost reduction at no quality cost, provided
 the cached prefix is genuinely stable.
 
-### 4. The submission line is storage-enforced
+### 4. The submission line is registry-enforced; promotion is internal
 
 The structural firewall: nothing in the agent loop produces an
-outbound submission. The terminal effect of every action is a
-Quarry corpus row. Promotion to a Finding is `quarry finding
-promote`, run by the operator outside Modus. There is no
-`submit`, `publish`, `post`, or `report` action in the vocabulary,
-no submit-shaped tool exposed to the proposer, and none will be
-added.
+*outbound* submission to a third party. There is no `submit`,
+`publish`, `post`, `report-to-h1`, or equivalent tool in the
+default registry, and none will be added — that ban applies to
+both the codebase (no first-party submit-shaped tool) and to
+operator scope files (declaring one is a policy violation, not a
+config option). Submission of Findings to bug-bounty programmes
+remains the operator's, performed outside Modus.
 
-What the firewall does *not* do — superseded 2026-05-07: the
-prior verbal ban ("the proposer is told it never tells the
-operator to submit") is dropped. A Candidate's `rationale` may
-recommend the operator promote it to a Finding or submit it to a
-programme; that's an operator-facing recommendation, not an
-outbound submission. The structural absence of a submit action
-is what enforces the gate; the rationale's content is the
-operator's tool, not the firewall's.
+**Amended 2026-05-07 (v0.4.0):** Candidate→Finding promotion is
+now an *internal* corpus operation, not an external submission,
+and Modus closes that loop autonomously. The
+`corpus.promote_finding` builtin (registered in the default
+registry, dispatching to `modus.builtins.corpus.promote_finding`,
+calling Quarry's MCP `finding_promote` write tool) is invoked by
+the proposer on the step after a `hypothesize` whose
+`severity_hint` was `medium`, `high`, or `critical`. Severity-
+`low` and severity-`info` Candidates stay un-promoted for
+operator review — they don't represent payable bugs and shouldn't
+clutter the Findings table. Per-tool precondition: the Candidate
+id must appear in this run's observation pool
+(`state.known_evidence`), so cross-run promotion is structurally
+impossible — that remains the operator's `quarry finding
+promote` CLI verb.
+
+The earlier verbal ban ("the proposer is told it never tells the
+operator to submit") was dropped 2026-05-07. The earlier
+operator-only-promotion stance was dropped 2026-05-07 (v0.4.0).
+The remaining structural rule is the registry membership check on
+external submission, not on internal promotion.
 
 **Amended 2026-05-07 (ADR-0004):** the closed action vocabulary
 is replaced by an open `ToolRegistry`. The submission-line
-guarantee re-surfaces through the registry's trust boundary: no
+guarantee surfaces through the registry's trust boundary: no
 `submit`/`publish`/`post`/`report` *tool* is registered in the
 default registry, and adding one is project-policy off-limits
 (equivalent to forking and removing the firewall). The
 agent-emission firewall is the same — `tool_registered:<name>`
 fails the consistency check if the name isn't in the registry.
-The terminal-state-in-storage guarantee is unchanged.
 
 ## Consequences
 
