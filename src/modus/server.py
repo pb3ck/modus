@@ -52,12 +52,14 @@ from modus.actions import (
     Hypothesize,
     Probe,
     Request,
+    Tool,
 )
 from modus.consistency import ConsistencyChecker, Verdict
 from modus.corpus import CorpusClient, CorpusError
 from modus.executor import HttpExecutor
 from modus.proposer import make_proposer
 from modus.session import AsyncSession, ServerSession, SessionCandidate, SessionObservation
+from modus.tool_executor import ToolExecutor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,6 +106,14 @@ _ACTION_TOOL_DESCRIPTIONS: dict[str, str] = {
         "successful Modus session ends with one or more `hypothesize` "
         "calls. Modus never promotes Candidates to Findings; that's "
         "the operator's `quarry finding promote`."
+    ),
+    "tool": (
+        "Invoke a registered tool by name with structured arguments. "
+        "Open-ended dispatch: shell binaries (amass, nuclei, ...), "
+        "MCP-passthroughs (filesystem, fetch, ...), and Modus's own "
+        "builtin actions all share this single surface. The "
+        "consistency layer dispatches preconditions through the "
+        "registry; the executor dispatches to the right backend."
     ),
 }
 
@@ -260,6 +270,7 @@ def _build_tool_list() -> list[mcp_types.Tool]:
         "differential": Differential,
         "annotate": Annotate,
         "hypothesize": Hypothesize,
+        "tool": Tool,
     }
     for name, cls in action_classes.items():
         tools.append(
@@ -433,6 +444,12 @@ class ModusServer:
     session: ServerSession
     executor: HttpExecutor
     checker: ConsistencyChecker
+    tool_executor: ToolExecutor
+    """Generic ``Tool`` action dispatcher (#8). Routes shell /
+    builtin / mcp invocations through the registry from the same
+    ``_execute_action`` path the typed actions use, so the agent
+    loop and verified-action surface both reach Tool-action
+    dispatch through one code path."""
     _mcp_server: Server | None = field(default=None, init=False, repr=False)
 
     def _server(self) -> Server:
@@ -530,6 +547,25 @@ class ModusServer:
                 "candidate_index": len(self.session.candidates) - 1,
                 "bug_class": action.bug_class,
                 "rationale": action.rationale,
+            }
+        if isinstance(action, Tool):
+            spec = self.session.tool_registry.get(action.name)
+            if spec is None:
+                # Should be caught by the consistency layer first;
+                # defence-in-depth so a future bug in the dispatcher
+                # doesn't dispatch to nothing.
+                return {"error": f"tool {action.name!r} is not registered"}
+            tool_observation = await self.tool_executor.execute(action, spec)
+            self.session.observations.append(
+                SessionObservation(
+                    id=tool_observation.id,
+                    kind="tool",
+                    payload=tool_observation.as_payload(),
+                )
+            )
+            return {
+                "observation_id": tool_observation.id,
+                **tool_observation.as_payload(),
             }
         raise TypeError(f"unhandled action type: {type(action).__name__}")
 
@@ -1109,7 +1145,16 @@ async def serve(scope_path: Path) -> int:
         executor = await stack.enter_async_context(
             HttpExecutor(user_agent=session.scope.user_agent)
         )
-        modus = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+        tool_executor = ToolExecutor(session=session, scope=session.scope)
+        modus = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(
+                scope=session.scope,
+                registry=session.tool_registry,
+            ),
+            tool_executor=tool_executor,
+        )
         # Pre-warm the proposer's model in the background so the
         # first autonomous-session call doesn't pay the cold-load
         # cost. Best-effort; never blocks startup, never fatal.

@@ -13,10 +13,14 @@ stdio handshake side.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from modus.consistency import ConsistencyChecker
 from modus.corpus import (
@@ -137,7 +141,14 @@ def _server_with(
     executor = HttpExecutor()
     if transport is not None:
         executor._client = httpx.AsyncClient(transport=transport)
-    server = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+    from modus.tool_executor import ToolExecutor
+
+    server = ModusServer(
+        session=session,
+        executor=executor,
+        checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+        tool_executor=ToolExecutor(session=session, scope=session.scope),
+    )
     return server, session
 
 
@@ -310,7 +321,14 @@ class TestRequestTool:
             transport=httpx.MockTransport(handler),
             headers={"User-Agent": session.scope.user_agent},
         )
-        server = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
         await server._dispatch(
             "request",
             {"target": "target.example.com", "method": "GET", "path": "/"},
@@ -336,7 +354,14 @@ class TestRequestTool:
             transport=httpx.MockTransport(handler),
             headers={"User-Agent": session.scope.user_agent},
         )
-        server = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
         await server._dispatch(
             "request",
             {
@@ -697,6 +722,92 @@ class TestProposerWarmup:
             ),
         )
         await _warm_proposer_model(session)  # must not raise
+
+
+class TestToolDispatchThroughVerifiedSurface:
+    """End-to-end: ``tool`` MCP tool dispatches via the registry,
+    persists a ToolObservation into the session pool, and returns
+    a payload the host's LLM can read.
+    """
+
+    async def test_shell_tool_via_dispatch(self, tmp_path: Path) -> None:
+        # Register a deterministic shell tool that just echoes a
+        # message, then dispatch it via the ``tool`` MCP surface.
+        # /bin/echo is POSIX-portable.
+        scope_data = {
+            "target_name": "demo",
+            "allowed_assets": ["target.example.com"],
+            "tools": [
+                {
+                    "kind": "shell",
+                    "name": "test.echo",
+                    "description": "echo a message for tests",
+                    "args_schema": {
+                        "type": "object",
+                        "properties": {"msg": {"type": "string"}},
+                        "required": ["msg"],
+                        "additionalProperties": False,
+                    },
+                    "side_effect": "read",
+                    "argv_template": ["/bin/echo", "{msg}"],
+                    "timeout_seconds": 5.0,
+                },
+            ],
+        }
+        scope_path = tmp_path / "scope.json"
+        scope_path.write_text(json.dumps(scope_data))
+        session = ServerSession.from_scope_file(scope_path)
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=HttpExecutor(),
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
+        result = await server._dispatch(
+            "tool",
+            {"name": "test.echo", "args": {"msg": "wire-up confirmed"}},
+        )
+        # Verdict accepted (registered, args valid, no preconditions).
+        assert result.get("action") == "tool"
+        assert result["verdict"]["accepted"], result["verdict"]
+        # Observation persisted into the session pool.
+        assert len(session.observations) == 1
+        observation = session.observations[0]
+        assert observation.kind == "tool"
+        assert observation.payload["tool_name"] == "test.echo"
+        assert "wire-up confirmed" in observation.payload["stdout"]
+        assert observation.payload["exit_code"] == 0
+
+    async def test_unregistered_tool_rejected_at_consistency(self, tmp_path: Path) -> None:
+        scope_path = tmp_path / "scope.json"
+        scope_path.write_text(
+            json.dumps(
+                {
+                    "target_name": "demo",
+                    "allowed_assets": ["target.example.com"],
+                }
+            )
+        )
+        session = ServerSession.from_scope_file(scope_path)
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=HttpExecutor(),
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
+        result = await server._dispatch(
+            "tool",
+            {"name": "totally-fictional-tool", "args": {}},
+        )
+        assert result["verdict"]["accepted"] is False
+        assert any(
+            label.startswith("tool_registered:totally-fictional-tool")
+            for label in result["verdict"]["failed_preconditions"]
+        )
 
 
 def _llm_for_async_tests() -> LlmProviderConfig:

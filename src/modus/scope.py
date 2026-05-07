@@ -154,7 +154,7 @@ class ShellToolDeclaration(BaseModel):
     timeout_seconds: float = Field(default=60.0, gt=0.0, le=3600.0)
 
     def to_spec(self) -> ToolSpec:
-        from modus.tools import ShellInvocation, ToolSpec
+        from modus.tools import ShellInvocation, ToolSpec, _accept_all_preconditions
 
         return ToolSpec(
             name=self.name,
@@ -168,6 +168,14 @@ class ShellToolDeclaration(BaseModel):
                 env_passthrough=self.env_passthrough,
                 timeout_seconds=self.timeout_seconds,
             ),
+            # Operator-declared shell tools default to "accept after
+            # args_schema validation passed." The operator is
+            # responsible for scoping the tool's reach via the
+            # ``argv_template`` — if the template can be coerced to
+            # escape scope, that's on them. Built-in shell tools
+            # (amass, nuclei) override with their own scope-gating
+            # preconditions in :mod:`modus.tools`.
+            preconditions=_accept_all_preconditions,
         )
 
 
@@ -190,7 +198,7 @@ class McpToolDeclaration(BaseModel):
     tool_name: str = Field(min_length=1, max_length=128)
 
     def to_spec(self) -> ToolSpec:
-        from modus.tools import McpInvocation, ToolSpec
+        from modus.tools import McpInvocation, ToolSpec, _accept_all_preconditions
 
         return ToolSpec(
             name=self.name,
@@ -202,6 +210,7 @@ class McpToolDeclaration(BaseModel):
                 server_name=self.server_name,
                 tool_name=self.tool_name,
             ),
+            preconditions=_accept_all_preconditions,
         )
 
 

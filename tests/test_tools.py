@@ -134,10 +134,20 @@ class TestBuiltinSpecs:
 
 
 class TestDefaultRegistry:
-    def test_default_registry_has_six_builtins(self) -> None:
+    def test_default_registry_has_typed_action_and_recon_builtins(self) -> None:
         registry = build_default_registry()
-        assert len(registry) == 6
-        for name in ("probe", "request", "compare", "differential", "annotate", "hypothesize"):
+        # Six typed-action builtins + two recon shell builtins.
+        assert len(registry) == 8
+        for name in (
+            "probe",
+            "request",
+            "compare",
+            "differential",
+            "annotate",
+            "hypothesize",
+            "amass.enum",
+            "nuclei.scan",
+        ):
             assert name in registry
 
     def test_default_registry_specs_are_frozen(self) -> None:
@@ -268,14 +278,20 @@ class TestScopeFileToolsBlock:
         }
         scope_path = tmp_path / "scope.json"
         scope_path.write_text(json.dumps(scope_data))
+        # Drop the conflicting operator-declared "amass.enum" — it
+        # collides with the now-default amass.enum builtin (the
+        # collision is intentionally tested elsewhere). Use a
+        # non-conflicting name here.
+        scope_data["tools"][0]["name"] = "operator.amass"  # type: ignore[index]
+        scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        # Six builtins + two operator-declared = eight.
-        assert len(session.tool_registry) == 8
-        assert "amass.enum" in session.tool_registry
+        # Eight default builtins + two operator-declared = ten.
+        assert len(session.tool_registry) == 10
+        assert "operator.amass" in session.tool_registry
         assert "files.read" in session.tool_registry
         # The operator-declared ones got the right invocation kind.
-        amass = session.tool_registry.get("amass.enum")
-        assert amass is not None and amass.kind == "shell"
+        operator_amass = session.tool_registry.get("operator.amass")
+        assert operator_amass is not None and operator_amass.kind == "shell"
         files = session.tool_registry.get("files.read")
         assert files is not None and files.kind == "mcp"
 
@@ -287,7 +303,9 @@ class TestScopeFileToolsBlock:
         scope_path = tmp_path / "scope.json"
         scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        assert len(session.tool_registry) == 6  # only builtins
+        # Eight default builtins (six typed-action + amass.enum +
+        # nuclei.scan).
+        assert len(session.tool_registry) == 8
 
     def test_scope_file_duplicate_tool_name_rejected(self, tmp_path: Path) -> None:
         # Same name twice in the scope file's tools block —
@@ -343,6 +361,84 @@ class TestScopeFileToolsBlock:
             ServerSession.from_scope_file(scope_path)
 
 
+class TestReconBuiltinSpecs:
+    """Contract tests for amass.enum + nuclei.scan registrations.
+
+    The integration-marked end-to-end tests live in
+    ``test_tools_integration.py``; here we cover the
+    registration shape and the per-tool preconditions logic.
+    """
+
+    def test_amass_and_nuclei_registered_in_default_registry(self) -> None:
+        registry = build_default_registry()
+        amass = registry.get("amass.enum")
+        nuclei = registry.get("nuclei.scan")
+        assert amass is not None
+        assert nuclei is not None
+        assert amass.kind == "shell"
+        assert nuclei.kind == "shell"
+        assert amass.side_effect == "active"
+        assert nuclei.side_effect == "active"
+
+    def test_amass_preconditions_accept_in_scope_domain(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _amass_preconditions
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        labels = _amass_preconditions({"domain": "target.example.com"}, scope, CorpusState())
+        assert all(value for _, value in labels), labels
+
+    def test_amass_preconditions_reject_out_of_scope_domain(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _amass_preconditions
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        labels = _amass_preconditions({"domain": "evil.example.com"}, scope, CorpusState())
+        assert any(not value for _, value in labels), labels
+
+    def test_nuclei_preconditions_accept_in_scope_url(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _nuclei_preconditions
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"https://target.example.com"}),
+        )
+        labels = _nuclei_preconditions(
+            {"url": "https://target.example.com/api/v1/x"}, scope, CorpusState()
+        )
+        assert all(value for _, value in labels), labels
+
+    def test_nuclei_preconditions_reject_wrong_scheme(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _nuclei_preconditions
+
+        # Scope is HTTPS-only; HTTP URL must reject.
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"https://target.example.com"}),
+        )
+        labels = _nuclei_preconditions({"url": "http://target.example.com/"}, scope, CorpusState())
+        assert any(not value for _, value in labels), labels
+
+    def test_nuclei_preconditions_reject_unparseable_url(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _nuclei_preconditions
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        labels = _nuclei_preconditions({"url": "not a url"}, scope, CorpusState())
+        assert any(not value for _, value in labels), labels
+
+
 class TestServerSessionDefault:
     def test_default_session_has_default_registry(self) -> None:
         # ServerSession() without going through from_scope_file
@@ -354,5 +450,8 @@ class TestServerSessionDefault:
             allowed_assets=frozenset({"target.example.com"}),
         )
         session = ServerSession(scope=scope, llm=None)
-        assert len(session.tool_registry) == 6
+        # Eight default builtins (six typed-action + amass.enum +
+        # nuclei.scan).
+        assert len(session.tool_registry) == 8
         assert "request" in session.tool_registry
+        assert "amass.enum" in session.tool_registry

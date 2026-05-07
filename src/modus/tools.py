@@ -64,6 +64,57 @@ def _no_preconditions(
     return [("tool_preconditions_not_yet_implemented", False)]
 
 
+def _accept_all_preconditions(
+    args: dict[str, Any], scope: ScopePolicy, state: CorpusState
+) -> list[tuple[str, bool]]:
+    """Builtin tools that don't have a meaningful precondition
+    beyond JSON Schema args validation accept unconditionally.
+
+    Used by the typed-action builtin specs whose real gating
+    happens in the legacy ``_preconditions`` switch (the
+    typed-action MCP surface still routes through it). Once #10's
+    full migration lands and typed actions dispatch via the
+    registry, these stubs get replaced with the per-action
+    preconditions lifted from the legacy switch.
+    """
+    return []
+
+
+def _amass_preconditions(
+    args: dict[str, Any], scope: ScopePolicy, state: CorpusState
+) -> list[tuple[str, bool]]:
+    """Gate ``amass.enum`` invocations on the domain being in
+    ``scope.allowed_assets``.
+
+    Recon tools are still subject to the operator's scope envelope
+    even though they don't directly hit the target's HTTP surface
+    — DNS enumeration of ``*.target.com`` is "active" against the
+    target's authoritative servers and counts as in-scope traffic.
+    """
+    domain = str(args.get("domain", ""))
+    return [(f"amass_domain_in_scope:{domain}", domain in scope.hosts())]
+
+
+def _nuclei_preconditions(
+    args: dict[str, Any], scope: ScopePolicy, state: CorpusState
+) -> list[tuple[str, bool]]:
+    """Gate ``nuclei.scan`` invocations on the URL's
+    ``(host, port, tls)`` matching ``scope.allowed_endpoints`` —
+    the same precision the ``Request`` action's gating uses.
+    """
+    from urllib.parse import urlparse
+
+    url = str(args.get("url", ""))
+    parsed = urlparse(url)
+    if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+        return [(f"nuclei_url_parseable:{url}", False)]
+    host = parsed.hostname
+    tls = parsed.scheme == "https"
+    port = parsed.port  # may be None for default ports
+    in_scope = scope.request_in_scope(host, port, tls)
+    return [(f"nuclei_endpoint_in_scope:{parsed.scheme}://{host}", in_scope)]
+
+
 @dataclass(frozen=True)
 class ShellInvocation:
     """Dispatch via ``asyncio.create_subprocess_exec``.
@@ -266,6 +317,7 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.probe",
             ),
+            preconditions=_accept_all_preconditions,
         ),
         ToolSpec(
             name="request",
@@ -295,6 +347,7 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.request",
             ),
+            preconditions=_accept_all_preconditions,
         ),
         ToolSpec(
             name="compare",
@@ -320,6 +373,7 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.compare",
             ),
+            preconditions=_accept_all_preconditions,
         ),
         ToolSpec(
             name="differential",
@@ -352,6 +406,7 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.differential",
             ),
+            preconditions=_accept_all_preconditions,
         ),
         ToolSpec(
             name="annotate",
@@ -372,6 +427,7 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.annotate",
             ),
+            preconditions=_accept_all_preconditions,
         ),
         ToolSpec(
             name="hypothesize",
@@ -404,13 +460,94 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             invocation=BuiltinInvocation(
                 callable_dotted_path="modus.builtins.hypothesize",
             ),
+            preconditions=_accept_all_preconditions,
+        ),
+    )
+
+
+def builtin_recon_tool_specs() -> tuple[ToolSpec, ...]:
+    """First-party shell-tool registrations for recon binaries.
+
+    These ship in the default registry so operators get them out
+    of the box (assuming the binaries are on ``$PATH``). The
+    executor surfaces ``binary not found`` if they aren't —
+    operators who don't have ``amass`` or ``nuclei`` installed
+    just see those tools error at dispatch, which is the right
+    fallback behaviour: the registry entry exists, the proposer
+    can emit it, but invocation fails cleanly.
+
+    Each entry's preconditions function is the structural scope
+    gate — amass.enum requires the domain to be in
+    ``scope.hosts()``; nuclei.scan requires the URL's
+    ``(host, port, tls)`` to match ``scope.allowed_endpoints``.
+    Without these, the agent could DNS-enumerate or vuln-scan an
+    out-of-scope target as easily as an in-scope one.
+    """
+    return (
+        ToolSpec(
+            name="amass.enum",
+            kind="shell",
+            description=(
+                "Subdomain enumeration via amass. Args: "
+                "{domain: str}. The domain must be in scope. Side "
+                "effect is `active` — generates DNS queries to the "
+                "target's authoritative servers."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {"domain": {"type": "string"}},
+                "required": ["domain"],
+                "additionalProperties": False,
+            },
+            side_effect="active",
+            invocation=ShellInvocation(
+                argv_template=("amass", "enum", "-d", "{domain}", "-timeout", "5"),
+                env_passthrough=("PATH", "HOME"),
+                timeout_seconds=600.0,
+            ),
+            preconditions=_amass_preconditions,
+        ),
+        ToolSpec(
+            name="nuclei.scan",
+            kind="shell",
+            description=(
+                "Vulnerability scan with nuclei. Args: "
+                "{url: str, templates: list[str]}. The URL's "
+                "host:port:tls must be in scope. Side effect is "
+                "`active` — sends HTTP requests to the target."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "templates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            side_effect="active",
+            invocation=ShellInvocation(
+                # ``nuclei -t {templates}`` accepts a comma-joined
+                # template list. The placeholder substitutes a
+                # str() of the list — operators may want to invoke
+                # this directly via stdin or a config file in a
+                # follow-up; for v0.3.0 the simple shape ships.
+                argv_template=("nuclei", "-u", "{url}", "-jsonl", "-silent"),
+                env_passthrough=("PATH", "HOME"),
+                timeout_seconds=900.0,
+            ),
+            preconditions=_nuclei_preconditions,
         ),
     )
 
 
 def build_default_registry() -> ToolRegistry:
-    """Construct a registry pre-populated with the six builtin
-    typed-action specs.
+    """Construct a registry pre-populated with Modus's first-party
+    tool specs: the six typed-action builtins plus the recon
+    shell tools (amass, nuclei).
 
     Operator-declared tools are added on top by callers that have
     a scope file in hand (see :meth:`modus.session.ServerSession.\
@@ -420,6 +557,8 @@ from_scope_file`). The default registry is what every
     """
     registry = ToolRegistry()
     for spec in builtin_typed_action_specs():
+        registry.register(spec)
+    for spec in builtin_recon_tool_specs():
         registry.register(spec)
     return registry
 
@@ -433,5 +572,6 @@ __all__ = [
     "ToolRegistry",
     "ToolSpec",
     "build_default_registry",
+    "builtin_recon_tool_specs",
     "builtin_typed_action_specs",
 ]
