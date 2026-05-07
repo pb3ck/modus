@@ -66,7 +66,7 @@ class LlmProviderConfig:
     -session tools refuse to run without one of these resolved.
     """
 
-    provider: str  # "anthropic" | "openai" | "openai-compatible"
+    provider: str  # "host" | "anthropic" | "openai" | "openai-compatible"
     model: str | None
     api_key: str | None
     base_url: str | None  # only meaningful for openai-compatible
@@ -79,19 +79,35 @@ class LlmProviderConfig:
         server start when this returns None — operators who only want
         the verified-action surface shouldn't need to set up an LLM
         provider just to start Modus.
+
+        Provider values:
+
+        * ``host`` — delegate every proposer call to the MCP host's
+          LLM via ``sampling/createMessage``. No API key needed.
+          Recommended for Claude Desktop / Claude Code operators
+          since they're already paying for the host's model and
+          sampling routes the agent's traffic through the same
+          conversation surface.
+        * ``anthropic``, ``openai``, ``openai-compatible`` — direct
+          API calls from Modus's process. Requires the matching
+          API key in env. Useful when the host doesn't support
+          sampling, or when the operator wants Modus's internal
+          LLM to be different from the host's.
         """
         env = env if env is not None else dict(os.environ)
         provider = env.get("MODUS_LLM_PROVIDER", "").strip().lower()
         if not provider:
             return None
-        valid = {"anthropic", "openai", "openai-compatible"}
+        valid = {"host", "anthropic", "openai", "openai-compatible"}
         if provider not in valid:
             raise ValueError(f"MODUS_LLM_PROVIDER={provider!r} is not one of {sorted(valid)}")
         return cls(
             provider=provider,
             model=env.get("MODUS_LLM_MODEL") or None,
             api_key=(
-                env.get("ANTHROPIC_API_KEY")
+                None
+                if provider == "host"
+                else env.get("ANTHROPIC_API_KEY")
                 if provider == "anthropic"
                 else env.get("OPENAI_API_KEY")
             ),

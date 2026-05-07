@@ -390,17 +390,90 @@ class OpenAICompatibleProposer(_LlmProposerBase):
         return str(content)
 
 
+# ----------------------------------------------------------- host sampling
+
+
+class HostSamplingProposer(_LlmProposerBase):
+    """Proposer that delegates completion to the MCP host's LLM.
+
+    No direct API connection. Modus's MCP server sends a
+    ``sampling/createMessage`` request back to the host on each
+    proposer step; the host's LLM (Claude in Claude Desktop / Claude
+    Code, whatever the operator is already paying for) generates the
+    proposal. Saves the operator from configuring a second provider,
+    avoids double-billing the same conversation through two endpoints,
+    and keeps the model-selection question in one place — the host's.
+
+    Per the MCP spec, hosts typically prompt the user to approve each
+    sampling call. That's a feature, not a bug, when the loop runs
+    inside an explicitly-invoked autonomous-session tool: the host's
+    user already approved that one tool call, so most hosts auto-allow
+    sampling requests originated from inside it. Hosts that prompt per
+    call surface the proposer's traffic to the operator transparently.
+
+    Requires the host to support sampling. Claude Desktop and Claude
+    Code do; some other MCP hosts don't yet. Operators whose host
+    doesn't support sampling should set ``MODUS_LLM_PROVIDER`` to
+    ``anthropic`` or ``openai-compatible`` and configure a direct API
+    key instead.
+    """
+
+    DEFAULT_MODEL = "<host-sampled>"
+
+    def __init__(
+        self,
+        *,
+        scope: ScopePolicy,
+        mcp_session: Any,
+        max_tokens: int = 4096,
+    ) -> None:
+        super().__init__(scope=scope, model=self.DEFAULT_MODEL, max_tokens=max_tokens)
+        self._session = mcp_session
+
+    async def _complete(self, system: str, user: str) -> str:
+        from mcp.types import SamplingMessage, TextContent
+
+        result = await self._session.create_message(
+            messages=[SamplingMessage(role="user", content=TextContent(type="text", text=user))],
+            max_tokens=self._max_tokens,
+            system_prompt=system,
+        )
+        # ``CreateMessageResult.content`` is a single content block.
+        text = getattr(result.content, "text", None)
+        if text is None:
+            return ""
+        return str(text)
+
+
 # ----------------------------------------------------------- factory
 
 
-def make_proposer(*, llm: LlmProviderConfig, scope: ScopePolicy) -> Proposer:
+def make_proposer(
+    *,
+    llm: LlmProviderConfig,
+    scope: ScopePolicy,
+    mcp_session: Any | None = None,
+) -> Proposer:
     """Construct the right proposer for the operator's configured provider.
 
     Called by the autonomous-session tool handler in ``server.py``
     once it's confirmed the LLM provider is configured. Provider
     portability lives here — adding a fourth provider is "add a
     branch."
+
+    When ``llm.provider == "host"``, the caller must pass the
+    in-flight MCP session so the proposer can route sampling requests
+    back to the host. Other providers ignore ``mcp_session``.
     """
+    if llm.provider == "host":
+        if mcp_session is None:
+            raise ValueError(
+                "MODUS_LLM_PROVIDER=host requires an active MCP session. The "
+                "autonomous-session tool handler should pass the host's "
+                "ServerSession; this proposer cannot work outside an "
+                "MCP request context."
+            )
+        return HostSamplingProposer(scope=scope, mcp_session=mcp_session)
     if llm.provider == "anthropic":
         return AnthropicProposer(scope=scope, api_key=llm.api_key, model=llm.model)
     if llm.provider in ("openai", "openai-compatible"):
@@ -433,6 +506,7 @@ class FixedProposer:
 __all__ = [
     "AnthropicProposer",
     "FixedProposer",
+    "HostSamplingProposer",
     "OpenAICompatibleProposer",
     "Proposer",
     "StepContext",

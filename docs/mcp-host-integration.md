@@ -134,26 +134,52 @@ doesn't care which side of the container boundary it lives on.
 
 ## Picking the Modus-internal LLM provider
 
-Modus's autonomous loop uses its own LLM provider, separate
-from whatever your host is running. The choice is via
-environment, set in the MCP server's `env` block:
+Modus's autonomous loop needs an LLM to generate proposals at
+each step. The choice is via environment, set in the MCP server's
+`env` block:
 
 | Provider | `MODUS_LLM_PROVIDER` | Other env required |
 |---|---|---|
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY`, optionally `MODUS_LLM_MODEL` (default: `claude-opus-4-7`) |
-| OpenAI | `openai` | `OPENAI_API_KEY`, optionally `MODUS_LLM_MODEL` |
+| **Host sampling (recommended)** | `host` | none |
+| Anthropic direct | `anthropic` | `ANTHROPIC_API_KEY`, optionally `MODUS_LLM_MODEL` |
+| OpenAI direct | `openai` | `OPENAI_API_KEY`, optionally `MODUS_LLM_MODEL` |
 | OpenAI-compatible (Ollama, vLLM, OpenRouter, ...) | `openai-compatible` | `MODUS_LLM_BASE_URL`, optionally `OPENAI_API_KEY`, `MODUS_LLM_MODEL` |
 
-The host's model and Modus's model are independent. A common
-pattern: Claude Desktop on Sonnet for the conversation, Modus
-internally on Anthropic Opus for the autonomous search; or
-Claude Desktop on Sonnet and Modus internally on a local
-Ollama for cost reasons.
+### Why `host` is the recommended default
+
+With `MODUS_LLM_PROVIDER=host`, Modus delegates each proposer
+call back to the host's LLM via the standard MCP
+`sampling/createMessage` request. The Claude that's already
+running your conversation in Claude Desktop / Claude Code is
+the same Claude that generates Modus's proposals — no second
+API key, no second billing surface, no model-version mismatch
+between host and agent.
+
+The MCP spec lets hosts prompt the user to approve each
+sampling call. Claude Desktop and Claude Code show the
+sampling traffic in their existing approval UX, so the
+operator gets transparency over what the autonomous loop is
+asking the model to do without paying for two LLM endpoints.
+
+### When to use direct API providers
+
+* The operator's host doesn't support sampling (older MCP
+  hosts may not).
+* The operator wants Modus's internal LLM to be a *different*
+  model than the host's — e.g. Claude Desktop on Sonnet for
+  the conversation but Modus internally on Opus for the
+  autonomous search, or Modus internally on a local Ollama
+  for cost reasons.
+* The operator wants to bypass the host's per-call sampling
+  approval UX entirely (e.g. running a long unsupervised
+  session).
 
 If `MODUS_LLM_PROVIDER` is unset, Modus's autonomous-session
 tools return `isError=True` with a message naming the env
 variable. The verified-action surface and the Quarry
-passthroughs are unaffected.
+passthroughs are unaffected. The simplest config is just
+`MODUS_LLM_PROVIDER=host` with no other LLM env — the host
+does the rest.
 
 ## Picking a scope
 

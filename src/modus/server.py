@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mcp import types as mcp_types
@@ -327,9 +327,11 @@ class ModusServer:
     session: ServerSession
     executor: HttpExecutor
     checker: ConsistencyChecker
+    _mcp_server: Server | None = field(default=None, init=False, repr=False)
 
     def _server(self) -> Server:
         server: Server = Server(name="modus", version=__version__)
+        self._mcp_server = server
 
         # The mcp SDK's `list_tools()` and `call_tool()` decorators are
         # typed loosely (they accept `Any` and return `Any`); mypy in
@@ -588,8 +590,29 @@ class ModusServer:
                 "missing": ["MODUS_LLM_PROVIDER"],
             }
 
+        # When provider=host, the proposer needs the live MCP session
+        # so it can route sampling/createMessage requests back to the
+        # host. The session is only available inside a request handler;
+        # we read it from the Server's ContextVar.
+        host_mcp_session: Any = None
+        if self.session.llm.provider == "host" and self._mcp_server is not None:
+            try:
+                host_mcp_session = self._mcp_server.request_context.session
+            except (LookupError, AttributeError):
+                return {
+                    "error": (
+                        "MODUS_LLM_PROVIDER=host requires an MCP request context, "
+                        "but none was available. This shouldn't happen during a "
+                        "tool call — file a bug if you see it."
+                    )
+                }
+
         try:
-            proposer = make_proposer(llm=self.session.llm, scope=self.session.scope)
+            proposer = make_proposer(
+                llm=self.session.llm,
+                scope=self.session.scope,
+                mcp_session=host_mcp_session,
+            )
         except (ValueError, ImportError) as exc:
             return {"error": f"failed to construct proposer: {exc}"}
 

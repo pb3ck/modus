@@ -461,7 +461,9 @@ class TestAutonomousToolGate:
         # Replace make_proposer in the server module with a stub that
         # returns a deterministic FixedProposer — avoids touching the
         # real anthropic client.
-        def _stub_make_proposer(*, llm: object, scope: object) -> object:
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
         from modus import server as server_module
@@ -497,7 +499,9 @@ class TestAutonomousToolGate:
             ),
         )
 
-        def _stub_make_proposer(*, llm: object, scope: object) -> object:
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
             return FixedProposer(
                 [
                     Probe(target="target.example.com"),

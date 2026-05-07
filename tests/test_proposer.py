@@ -318,6 +318,66 @@ class TestMakeProposer:
         with pytest.raises(ValueError):
             make_proposer(llm=cfg, scope=_scope())
 
+    def test_host_provider_requires_mcp_session(self) -> None:
+        cfg = LlmProviderConfig(provider="host", model=None, api_key=None, base_url=None)
+        with pytest.raises(ValueError, match="active MCP session"):
+            make_proposer(llm=cfg, scope=_scope())
+
+    def test_host_provider_constructs_with_session(self) -> None:
+        from modus.proposer import HostSamplingProposer
+
+        cfg = LlmProviderConfig(provider="host", model=None, api_key=None, base_url=None)
+
+        class _FakeMcpSession:
+            async def create_message(self, **_: Any) -> Any: ...
+
+        proposer = make_proposer(llm=cfg, scope=_scope(), mcp_session=_FakeMcpSession())
+        assert isinstance(proposer, HostSamplingProposer)
+
+
+class TestHostSamplingProposer:
+    async def test_round_trips_through_host_session(self) -> None:
+        from modus.proposer import HostSamplingProposer
+
+        captured: dict[str, Any] = {}
+
+        class _FakeResult:
+            class content:  # noqa: N801 - mimicking SDK shape
+                text = json.dumps({"actions": [{"kind": "probe", "target": "target.example.com"}]})
+
+        class _FakeMcpSession:
+            async def create_message(self, **kwargs: Any) -> Any:
+                captured.update(kwargs)
+                return _FakeResult()
+
+        proposer = HostSamplingProposer(scope=_scope(), mcp_session=_FakeMcpSession())
+        actions = await proposer.propose(_step_context())
+        assert len(actions) == 1
+        assert isinstance(actions[0], Probe)
+        # Sampling call carried system + user prompts to the host.
+        assert "Action grammar" in captured["system_prompt"]
+        assert captured["max_tokens"] > 0
+        assert len(captured["messages"]) == 1
+
+    async def test_returns_empty_on_session_error(self) -> None:
+        from modus.proposer import HostSamplingProposer
+
+        class _Boom:
+            async def create_message(self, **_: Any) -> Any:
+                raise RuntimeError("host disconnected")
+
+        proposer = HostSamplingProposer(scope=_scope(), mcp_session=_Boom())
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+
+class TestLlmProviderConfigHost:
+    def test_host_provider_no_api_key_required(self) -> None:
+        cfg = LlmProviderConfig.from_env({"MODUS_LLM_PROVIDER": "host"})
+        assert cfg is not None
+        assert cfg.provider == "host"
+        assert cfg.api_key is None
+
 
 # ------------------------------------------------------------ FixedProposer
 
