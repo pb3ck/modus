@@ -127,12 +127,22 @@ the cached prefix is genuinely stable.
 
 ### 4. The submission line is storage-enforced
 
-Nothing in the agent loop can produce submission-ready output.
-The terminal effect of every action is a Quarry corpus row.
-Promotion to a Finding is `quarry finding promote`, run by the
-operator outside Modus. There is no "report" action in the
-vocabulary, no "submit" tool exposed to the proposer, and no
-prompt language that asks the agent to produce report text.
+The structural firewall: nothing in the agent loop produces an
+outbound submission. The terminal effect of every action is a
+Quarry corpus row. Promotion to a Finding is `quarry finding
+promote`, run by the operator outside Modus. There is no
+`submit`, `publish`, `post`, or `report` action in the vocabulary,
+no submit-shaped tool exposed to the proposer, and none will be
+added.
+
+What the firewall does *not* do — superseded 2026-05-07: the
+prior verbal ban ("the proposer is told it never tells the
+operator to submit") is dropped. A Candidate's `rationale` may
+recommend the operator promote it to a Finding or submit it to a
+programme; that's an operator-facing recommendation, not an
+outbound submission. The structural absence of a submit action
+is what enforces the gate; the rationale's content is the
+operator's tool, not the firewall's.
 
 ## Consequences
 

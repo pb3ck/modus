@@ -17,8 +17,11 @@ the operator drives it from any MCP-aware host (Claude Desktop,
 Claude Code, Cursor, anything that speaks the Model Context Protocol).
 The agent's autonomous loop runs end-to-end inside Modus — the host
 just kicks it off and reads the result. The single hard human gate
-is on the way out: **Modus never submits. Modus never tells the
-operator to submit.**
+is on the way out: **Modus never submits.** No `submit`, `publish`,
+or `post` action exists in the grammar; promotion of a Candidate to
+a Finding is the operator's `quarry finding promote`, run outside
+Modus. Modus may *recommend* submission in a Candidate's rationale —
+the decision and the act remain the operator's.
 
 > **Status: alpha (0.1.0a1).** The autonomous loop runs end-to-end
 > against authorized targets — see [`docs/quickstart.md`](./docs/quickstart.md).
@@ -54,9 +57,12 @@ operator to submit.**
   Modus emits — autonomous loop or single tool call — terminates
   in a Quarry row (observation, comparison, annotation,
   Candidate). No `submit`, `report`, or `publish` tool exists in
-  Modus's MCP surface. Promotion to a Finding is the operator's
-  `quarry finding promote`, run outside Modus, after the
-  session ends.
+  Modus's MCP surface, and none will be added. Promotion to a
+  Finding is the operator's `quarry finding promote`, run outside
+  Modus, after the session ends. Modus's rationales may *recommend*
+  promotion or external submission — the structural firewall is the
+  absence of a submission action, not a ban on operator-facing
+  recommendations.
 
 ## What this isn't
 
@@ -119,9 +125,11 @@ Modus takes a different bet, in five parts.
   Modus is not locked to any provider on either side.
 - The submission line is **storage-enforced**. Modus's terminal
   state is a Candidate in Quarry. Promotion is Quarry's
-  `quarry finding promote`, run by the operator. There is no
-  Modus-side path that produces submission text or a
-  recommendation to submit.
+  `quarry finding promote`, run by the operator. No `submit`,
+  `publish`, or `post` action exists in Modus's grammar; the
+  structural firewall is the absence of an outbound action, not
+  a ban on the agent's rationale recommending the operator
+  promote or submit.
 
 These five commitments are the invariants. The specific MCP
 host, the specific LLM provider, the specific Z3 encoding, the
@@ -241,10 +249,15 @@ exact tool surface Modus consumes.
 - Competing with commercial autonomous pentesters on benchmark
   scores. Modus is a different bet on the agent's *shape*, not
   on raw recall.
-- Submitting reports. Ever. At any milestone. Under any flag.
-- Generating submission-ready report text. The agent's output
-  is structured Candidates in Quarry; the operator's report is
-  the operator's job.
+- Submitting reports automatically. Ever. At any milestone.
+  Under any flag. There is no outbound action in the grammar;
+  promotion is the operator's `quarry finding promote`. Modus's
+  rationale may *recommend* the operator submit a Candidate, but
+  the act is theirs.
+- Generating finished, submission-ready report text without
+  operator review. Candidates are structured rationales the
+  operator triages; turning a triaged set into a programme-ready
+  submission package is the operator's job.
 - Running outside operator-defined scope. Scope is encoded as
   preconditions in the consistency layer; the agent cannot
   propose, much less execute, an action against an out-of-scope

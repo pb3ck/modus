@@ -10,6 +10,41 @@ notice.
 
 ## [Unreleased]
 
+### Changed
+
+- **Submission policy revised.** The structural firewall (no
+  `submit`/`publish`/`post` action in the grammar, terminal state
+  is a Candidate in storage, promotion to Finding is the operator's
+  `quarry finding promote`) is unchanged and remains a committed
+  invariant. The verbal ban — "Modus never tells the operator to
+  submit" — is dropped. A `hypothesize` rationale, a session
+  summary, or any operator-facing output may now legitimately
+  recommend the operator promote a Candidate or submit it to a
+  bug-bounty programme. The agent's gate is structural (no outbound
+  action exists), not communicative. Affects: README, ROADMAP,
+  proposer system prompt, ADR-0002 §4, ADR-0003 §6, quickstart,
+  `SessionCandidate` docstring.
+- Pulled `qwen2.5-coder:7b`, `qwen2.5-coder:14b`, `qwen3:8b`,
+  `phi4:14b`, and `gemma2:9b` against the proposer's prompt; landed
+  on `gemma2:9b` as the practical sweet spot for local autonomous
+  loops on M1 Pro / 16 GB unified memory (4/4 sections in rationale,
+  severity=critical, ~19s warm inference per step).
+
+### Added
+
+- Closing-rule block in proposer's per-step prompt: when bug_classes
+  is non-empty, instructs the model to emit `hypothesize` once
+  recent observations evidence one of them, with the four-section
+  rationale shape (Vulnerability / Exploit / Evidence / Impact) and
+  deliberate `severity_hint` selection.
+- `request_body` excerpt in step history summaries so the proposer
+  can tell SQLi from a normal login (`response_body` excerpt alone
+  is not enough — the contrast lives in the *request*).
+- `(host, port, tls)` triples rendered explicitly in the proposer's
+  scope block. Smaller models stop emitting URL-form `target` values
+  and dropping `port`/`tls`.
+- Defensive clause: `rationale` field MUST be non-empty.
+
 ## [0.1.0a1] — 2026-05-07
 
 First alpha. Modus is an autonomous offensive agent delivered as

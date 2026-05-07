@@ -149,16 +149,23 @@ via `--scope` or `MODUS_SCOPE_PATH`). Parsed once at startup,
 held immutably for the server's lifetime, consulted by the
 consistency layer on every tool call (surface A and surface B).
 
-### 6. The submission line is unchanged
+### 6. The submission line stays structural
 
-Modus has no `submit`, `report`, or `publish` tool on either
-surface. The terminal effect of every action — verified or
-autonomous — is a Candidate row (or an annotation, observation,
-or comparison) in Quarry. Promotion is the operator's
-`quarry finding promote`, run outside Modus, after the session
-ends. The autonomous-session tools cannot escape this; they're
-implemented on top of the same action vocabulary that has no
-submission verb in it.
+Modus has no `submit`, `report`, `publish`, or `post` tool on
+either surface, and none will be added. The terminal effect of
+every action — verified or autonomous — is a Candidate row (or
+an annotation, observation, or comparison) in Quarry. Promotion
+is the operator's `quarry finding promote`, run outside Modus
+after the session ends. The autonomous-session tools cannot
+escape this; they're implemented on top of the same action
+vocabulary that has no submission verb in it.
+
+What the firewall does *not* do — clarified 2026-05-07: a
+Candidate's `rationale` may legitimately recommend the operator
+promote or submit. That is an operator-facing recommendation in
+storage, not an outbound submission. The structural absence of
+a submit-shaped action is the gate; the rationale's content is
+the operator's input, not the firewall's surface.
 
 ### 7. "Autonomous within scope" is delivered by surface A
 

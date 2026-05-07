@@ -138,9 +138,12 @@ class SessionCandidate:
     """A Candidate the agent has authored in this session.
 
     Per the submission line, Modus does not promote Candidates to
-    Findings. The autonomous-session tool returns its accumulated
+    Findings — there is no ``submit``/``publish``/``post`` action in
+    the grammar. The autonomous-session tool returns its accumulated
     Candidates as part of its MCP result; the operator decides what
     to do with them via Quarry's own ``quarry finding promote`` flow.
+    A Candidate's ``rationale`` may legitimately recommend the
+    operator promote or submit; the act remains the operator's.
     """
 
     bug_class: str

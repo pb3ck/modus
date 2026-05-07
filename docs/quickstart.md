@@ -151,9 +151,11 @@ The MCP tool result is a JSON payload with two top-level fields:
 - `candidates` — the Candidates the agent authored via
   `hypothesize` actions.
 
-Modus does not promote Candidates to Findings. Modus does not
-recommend submission. If a Candidate looks defensible, you
-promote it via Quarry's own CLI:
+Modus does not promote Candidates to Findings itself — that is
+the operator's `quarry finding promote`, run outside Modus.
+Modus's rationales may recommend promotion or submission; the
+decision and the act remain yours. If a Candidate looks
+defensible, you promote it via Quarry's own CLI:
 
 ```sh
 quarry finding list                       # see the corpus's candidates
