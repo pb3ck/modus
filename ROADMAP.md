@@ -44,7 +44,7 @@ over stdio. Modus reads corpus state via Quarry's read-only tools
 `modus corpus status` resolves a Quarry corpus and reports
 current state. Modus reimplements no Quarry functionality.
 
-## Milestone 3 — MCP server with verified-action surface
+## Milestone 3 — MCP server with verified-action surface (done)
 
 Modus is itself an MCP server. `modus mcp` starts the server
 over stdio. The server registers:
@@ -78,7 +78,7 @@ tool and every Quarry passthrough; rejected actions surface
 their failed preconditions to the host; the autonomous-session
 tools are listed but error with a clear pointer to M4.
 
-## Milestone 4 — Autonomous-session tool
+## Milestone 4 — Autonomous-session tool (done)
 
 The `run_autonomous_session` tool runs the full ADR-0002 loop
 inside its handler:

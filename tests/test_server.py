@@ -374,9 +374,12 @@ class TestAutonomousToolGate:
         assert "error" in result
         assert "MODUS_LLM_PROVIDER" in result["missing"]
 
-    async def test_run_autonomous_session_returns_milestone_marker_when_llm_set(
-        self,
+    async def test_run_autonomous_session_invokes_loop_when_llm_set(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
         server, _session = _server_with(
             quarry=_FixedCorpusClient(),
             llm=LlmProviderConfig(
@@ -386,11 +389,68 @@ class TestAutonomousToolGate:
                 base_url=None,
             ),
         )
+
+        # Replace make_proposer in the server module with a stub that
+        # returns a deterministic FixedProposer — avoids touching the
+        # real anthropic client.
+        def _stub_make_proposer(*, llm: object, scope: object) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
         result = await server._dispatch(
             "run_autonomous_session",
-            {"target": "demo", "bug_classes": ["idor"]},
+            {
+                "target": "demo",
+                "bug_classes": ["idor"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+            },
         )
-        assert result.get("milestone") == "M4"
+        assert "session" in result
+        assert result["session"]["target_name"] == "demo"
+        assert result["session"]["step_count"] == 1
+        assert result["session"]["executed_count"] == 1
+
+    async def test_propose_actions_returns_pruned_proposals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        def _stub_make_proposer(*, llm: object, scope: object) -> object:
+            return FixedProposer(
+                [
+                    Probe(target="target.example.com"),
+                    Probe(target="evil.example.com"),
+                ]
+            )
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        result = await server._dispatch(
+            "propose_actions", {"context": "find IDOR", "sample_count": 4}
+        )
+        assert "proposals" in result
+        proposals = result["proposals"]
+        assert len(proposals) == 2
+        accepted = [p for p in proposals if p["accepted"]]
+        rejected = [p for p in proposals if not p["accepted"]]
+        assert len(accepted) == 1
+        assert len(rejected) == 1
 
     async def test_propose_actions_errors_when_no_llm(self) -> None:
         server, _session = _server_with(quarry=_FixedCorpusClient(), llm=None)

@@ -52,6 +52,7 @@ from modus.actions import (
 from modus.consistency import ConsistencyChecker, Verdict
 from modus.corpus import CorpusClient, CorpusError
 from modus.executor import HttpExecutor
+from modus.proposer import make_proposer
 from modus.session import ServerSession, SessionCandidate, SessionObservation
 
 if TYPE_CHECKING:
@@ -564,15 +565,86 @@ class ModusServer:
                 ),
                 "missing": ["MODUS_LLM_PROVIDER"],
             }
-        # Milestone 4 wiring lands here. Until then, surface a deliberate
-        # not-yet-implemented marker rather than an opaque traceback.
+
+        try:
+            proposer = make_proposer(llm=self.session.llm, scope=self.session.scope)
+        except (ValueError, ImportError) as exc:
+            return {"error": f"failed to construct proposer: {exc}"}
+
+        if name == "run_autonomous_session":
+            return await self._run_autonomous_session(proposer, arguments)
+        if name == "propose_actions":
+            return await self._propose_actions(proposer, arguments)
+        return {"error": f"unknown autonomous tool: {name!r}"}
+
+    async def _run_autonomous_session(
+        self, proposer: Any, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        from modus.agent import AgentLoop, Budget
+
+        target = str(arguments.get("target") or self.session.scope.target_name)
+        bug_classes = list(arguments.get("bug_classes") or [])
+        budget_args = dict(arguments.get("budget") or {})
+        budget = Budget(
+            max_steps=int(budget_args.get("max_steps", Budget().max_steps)),
+            max_wall_seconds=float(budget_args.get("max_wall_seconds", Budget().max_wall_seconds)),
+        )
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=self.checker,
+            session=self.session,
+            execute_action=self._execute_action_for_loop,
+            budget=budget,
+        )
+        record = await loop.run(target_name=target, bug_classes=bug_classes)
         return {
-            "error": (
-                f"{name!r} is not yet implemented at Milestone 3. The "
-                "autonomous loop lands at Milestone 4 — see ROADMAP.md."
-            ),
-            "milestone": "M4",
+            "session": record.to_payload(),
+            "candidates": [
+                {
+                    "bug_class": c.bug_class,
+                    "evidence_refs": list(c.evidence_refs),
+                    "rationale": c.rationale,
+                    "severity_hint": c.severity_hint,
+                }
+                for c in self.session.candidates
+            ],
         }
+
+    async def _propose_actions(self, proposer: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        from modus.proposer import StepContext
+
+        objective = str(arguments.get("context") or "")
+        sample_count = int(arguments.get("sample_count") or 8)
+        step_context = StepContext(
+            corpus_state=self.session.corpus_state(),
+            scope=self.session.scope,
+            objective=objective,
+            sample_count=sample_count,
+        )
+        proposals = await proposer.propose(step_context)
+        verdicts = self.checker.prune(proposals, step_context.corpus_state)
+        return {
+            "proposals": [
+                {
+                    "action": action.model_dump(),
+                    "accepted": verdict.accepted,
+                    "rationale": verdict.rationale,
+                    "failed_preconditions": list(verdict.failed_preconditions),
+                }
+                for action, verdict in verdicts
+            ],
+        }
+
+    async def _execute_action_for_loop(self, action: Action) -> dict[str, Any]:
+        """Adapter: the agent loop calls this for each survivor.
+
+        Modus's verified-action surface (per host tool call) and the
+        autonomous loop share the same executor by routing through
+        :meth:`_execute_action`. The verdict has already been produced
+        by the consistency layer in the loop, so we don't re-check
+        here.
+        """
+        return await self._execute_action(action)
 
 
 def _candidates_to_payload(candidates: list[Any]) -> dict[str, Any]:

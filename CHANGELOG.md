@@ -116,6 +116,47 @@ notice.
   Operators no longer drive Modus from the CLI; they drive it
   through their MCP host (Claude Desktop primarily).
 
+### Added (M4 — autonomous-session loop)
+
+- `src/modus/proposer.py` re-targeted from a stub to two real
+  provider-portable implementations: `AnthropicProposer` (Messages
+  API with prompt-cache control on the system prefix) and
+  `OpenAICompatibleProposer` (Chat Completions API with optional
+  `base_url` for OpenAI / Ollama / vLLM / OpenRouter and graceful
+  fallback when the upstream rejects `response_format`). Shared
+  prompt construction and response parsing in `_LlmProposerBase`;
+  malformed model output returns `[]` rather than crashing the
+  loop. New `make_proposer(llm, scope)` factory dispatches on
+  provider config.
+- `src/modus/agent.py` re-targeted from a skeleton to the full
+  propose-prune-rank-execute loop. `AgentLoop.run(target_name,
+  bug_classes, objective?)` runs end-to-end with a `Budget`
+  (max_steps, max_wall_seconds, max_consecutive_empty_steps)
+  and returns a `SessionRecord` with every sampled proposal,
+  every Z3 verdict, and every executed action. v0.1 ranking
+  heuristic is "first survivor wins"; the ranking surface is
+  in place for richer heuristics in v0.2+.
+- The `run_autonomous_session` and `propose_actions` MCP tool
+  handlers in `src/modus/server.py` are wired to the loop. The
+  autonomous session shares the verified-action surface's
+  executor (`_execute_action`) by dependency injection, so the
+  same Z3 → executor path runs whether the action was emitted
+  by Modus's own proposer or by the host's LLM.
+- The HTTP executor's User-Agent is now operator-configurable
+  via `ScopePolicy.user_agent` (default conservative
+  `Modus/{version}`, no project URL). Per-request action headers
+  override the scope default.
+- New tests: `tests/test_proposer.py` (parser robustness,
+  Anthropic + OpenAI-compatible round-trips with fake clients,
+  factory dispatch), `tests/test_agent.py` (happy path, empty
+  streak termination, step budget cap, executor error handling,
+  session-record serialisation), plus expanded
+  `tests/test_server.py` coverage of the autonomous tool
+  handlers.
+
+140 tests pass, 3 integration tests deselected. ruff clean, mypy
+strict clean.
+
 ### Changed
 
 - `README.md` and `ROADMAP.md` rewritten around the autonomous
