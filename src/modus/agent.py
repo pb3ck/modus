@@ -180,14 +180,27 @@ class AgentLoop:
                 if _action_dedup_key(candidate) not in recently_executed:
                     chosen = candidate
                     break
-            if chosen is None and survivors:
-                # All survivors are recent duplicates. Pick the first
-                # so the loop doesn't stall — but record the duplication
-                # so the proposer can reflect on it next step.
-                chosen = survivors[0][0]
+            all_duplicates = chosen is None and bool(survivors)
+            if all_duplicates:
+                # Every Z3-accepted survivor duplicates an action this
+                # session already executed. Treat the step as empty
+                # rather than re-running the duplicate — running it
+                # again wastes budget and pollutes the corpus with a
+                # near-identical observation row. The WARNING is
+                # appended now (before the next step's _step_context
+                # builds), so the proposer sees its stuckness in
+                # recent_history on the very next iteration. If the
+                # proposer keeps emitting only duplicates, the empty
+                # pruning streak will terminate the loop.
+                dup_keys = sorted({_action_dedup_key(c) for c, _ in survivors})
+                sample = dup_keys[0]
                 history.append(
-                    f"step {step_index}: WARNING all survivors duplicate recent actions — "
-                    "proposer is stuck. Try a different action kind or path."
+                    f"step {step_index}: WARNING all {len(survivors)} Z3-accepted "
+                    f"proposals duplicate actions executed earlier this session "
+                    f"(e.g. `{sample}`). Step skipped — running the duplicate "
+                    "again would waste budget. Try a different action kind, "
+                    "path, parameter, or — if you have evidence — emit "
+                    "`hypothesize` to close the loop."
                 )
 
             # 4. Execute the top-K (K=1 at v0.1)
@@ -204,7 +217,15 @@ class AgentLoop:
                 history.append(_summarise_step(step_index, chosen, result))
                 empty_streak = 0
             else:
-                history.append(f"step {step_index}: all {len(proposals)} proposals rejected by Z3")
+                if not all_duplicates:
+                    # Distinct from the all-duplicates branch above:
+                    # either Z3 rejected every survivor, or the
+                    # proposer returned no actions at all. The
+                    # all-duplicates branch already logged its own
+                    # WARNING; don't double-log here.
+                    history.append(
+                        f"step {step_index}: all {len(proposals)} proposals rejected by Z3"
+                    )
                 empty_streak += 1
 
             step_record = StepRecord(

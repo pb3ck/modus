@@ -101,7 +101,18 @@ class TestEmptyStreakTermination:
 
 class TestStepBudget:
     async def test_step_budget_caps_iterations(self) -> None:
-        proposer = FixedProposer([Probe(target="target.example.com")])
+        # Five distinct probes so the ranker can pick a fresh
+        # (non-duplicate) action each step — without strict dedup
+        # this test would have run the same action five times.
+        proposer = FixedProposer(
+            [
+                Probe(target="target.example.com", aspect="httpx"),
+                Probe(target="target.example.com", aspect="endpoints"),
+                Probe(target="target.example.com", aspect="jsbundle"),
+                Probe(target="target.example.com", aspect="tech"),
+                Probe(target="evil.example.com", aspect="httpx"),
+            ]
+        )
         session = _bare_session()
         executor = _RecordingExecutor()
         loop = AgentLoop(
@@ -115,6 +126,51 @@ class TestStepBudget:
         assert len(record.steps) == 5
         assert record.termination_reason == "step_budget_exhausted"
         assert len(executor.calls) == 5
+        # Each step should have executed a distinct action — the
+        # ranker's first-novel-survivor heuristic skips duplicates.
+        keys = {(c.kind, c.target, getattr(c, "aspect", None)) for c in executor.calls}
+        assert len(keys) == 5
+
+
+class TestStrictDedup:
+    async def test_duplicate_survivors_skip_step_and_terminate_via_empty_streak(
+        self,
+    ) -> None:
+        # Every step the proposer offers the SAME single action.
+        # Step 0 executes it. From step 1 onward the only Z3-accepted
+        # survivor is a recent duplicate, so strict dedup treats the
+        # step as empty rather than re-executing. The empty pruning
+        # streak should terminate the loop after
+        # ``max_consecutive_empty_steps`` empty steps.
+        proposer = FixedProposer([Probe(target="target.example.com")])
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=20, max_consecutive_empty_steps=3),
+        )
+        record = await loop.run(target_name="demo", bug_classes=["idor"])
+        # Step 0 runs the action; steps 1, 2, 3 are empty (all
+        # survivors duplicate step 0); empty_streak hits 3 and the
+        # loop terminates as ``empty_pruning_streak``.
+        assert len(executor.calls) == 1, (
+            "strict dedup must skip duplicate-survivor steps; the same "
+            "action should never run twice in a single session"
+        )
+        assert executor.calls[0].target == "target.example.com"
+        assert record.termination_reason == "empty_pruning_streak"
+        assert len(record.steps) == 4  # one executed + three empty
+        # Verify each empty step recorded executed=() (not re-running
+        # the duplicate).
+        assert [len(s.executed) for s in record.steps] == [1, 0, 0, 0]
 
 
 class TestExecutorErrorHandling:
