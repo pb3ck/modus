@@ -100,9 +100,12 @@ discriminator:
 
 - ``probe(target, aspect=httpx|jsbundle|endpoints|tech)`` — read what \
   the corpus already knows about an asset. Passive; no network.
-- ``request(target, method, path, headers?, body?)`` — send one HTTP \
-  request to an in-scope asset. Method must be in the session's \
-  allowed-methods set. Persists request/response pair as observation.
+- ``request(target, method, path, headers?, body?, port?, tls=true)`` \
+  — send one HTTP request to an in-scope asset. Method must be in the \
+  session's allowed-methods set. Defaults: ``tls=true`` (HTTPS) on the \
+  scheme's standard port. For local labs / non-standard ports set both: \
+  e.g. ``port=8080, tls=false`` produces ``http://target:8080/path``. \
+  Persists request/response pair as a session observation.
 - ``compare(observation_a, observation_b, dimensions)`` — diff two \
   existing observations along the named dimensions.
 - ``differential(observations, dimension=identity|auth|role|tenant, \
