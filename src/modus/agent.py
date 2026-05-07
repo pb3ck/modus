@@ -225,8 +225,13 @@ class AgentLoop:
         record.finished_at = _utcnow()
         return record
 
-    HISTORY_TAIL = 12  # how many recent steps to feed back to the proposer
-    DEDUP_TAIL = 6  # how far back to look when deduplicating proposals
+    HISTORY_TAIL = 16  # how many recent steps to feed back to the proposer
+    DEDUP_TAIL = 50  # how far back to look when deduplicating proposals
+    # ^ DEDUP_TAIL is effectively "the whole session" at v0.1 budgets.
+    # The proposer often re-emits the same URL after 8-10 steps even
+    # though it failed earlier; full-session dedup makes the agent
+    # spend budget on novel actions instead. If the agent legitimately
+    # wants to retry an URL, it can vary the method, headers, or body.
 
     def _recent_action_keys(self, steps: list[StepRecord]) -> set[str]:
         """Set of dedup keys for actions executed in the last few steps.
