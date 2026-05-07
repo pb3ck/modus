@@ -222,9 +222,8 @@ AGPL-3.0-or-later. See [`LICENSE`](./LICENSE).
 
 The AGPL choice is deliberate: Modus is offensive security
 infrastructure, and modifications that get deployed as services
-should be returned to the community. If the AGPL is incompatible
-with your use case, contact the maintainer about commercial
-licensing.
+should be returned to the community. Modus is pure FOSS — there
+is no dual-license model and no commercial-license offering.
 
 ## Contributing
 

@@ -74,6 +74,6 @@ makes the project less productive to participate in.
 ## License
 
 By contributing to Modus you agree that your contributions will
-be licensed under AGPL-3.0-or-later. Modus does not currently use
-a CLA. If that changes, this section will be updated and existing
-contributors notified.
+be licensed under AGPL-3.0-or-later. Modus does not use a CLA —
+contributions are inbound=outbound under the AGPL. There is no
+commercial-license offering and no plan to add one.
