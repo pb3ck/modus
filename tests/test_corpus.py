@@ -154,9 +154,7 @@ class TestLifecycle:
             await client.status()
         assert session.initialized is False  # we did not own the session
 
-    async def test_resolve_env_inherits_when_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_resolve_env_inherits_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from modus.corpus import _resolve_env
 
         monkeypatch.setenv("QUARRY_HOME", "/some/path")
