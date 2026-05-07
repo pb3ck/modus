@@ -167,20 +167,39 @@ class AgentLoop:
             verdicts = self.checker.prune(proposals, context.corpus_state)
             survivors = [(a, v) for a, v in verdicts if v.accepted]
 
-            # 3. Rank — v0.1 heuristic: first survivor wins
+            # 3. Rank — v0.1 heuristic: first novel survivor wins.
+            #    Deduplicate against actions executed in the last
+            #    ``DEDUP_TAIL`` steps so the agent doesn't re-run a
+            #    failing action just because the proposer keeps
+            #    putting it first.
+            recently_executed = self._recent_action_keys(record.steps)
+            chosen: Action | None = None
+            for candidate, _ in survivors:
+                if _action_dedup_key(candidate) not in recently_executed:
+                    chosen = candidate
+                    break
+            if chosen is None and survivors:
+                # All survivors are recent duplicates. Pick the first
+                # so the loop doesn't stall — but record the duplication
+                # so the proposer can reflect on it next step.
+                chosen = survivors[0][0]
+                history.append(
+                    f"step {step_index}: WARNING all survivors duplicate recent actions — "
+                    "proposer is stuck. Try a different action kind or path."
+                )
+
             # 4. Execute the top-K (K=1 at v0.1)
             executed: list[Action] = []
             execution_results: list[dict[str, Any]] = []
-            if survivors:
-                action, _verdict = survivors[0]
+            if chosen is not None:
                 try:
-                    result = await self.execute_action(action)
+                    result = await self.execute_action(chosen)
                 except Exception as exc:  # broad: don't kill the session on a tool error
                     _LOG.warning("execute_action raised: %s", exc)
                     result = {"error": f"executor raised: {exc}"}
-                executed.append(action)
+                executed.append(chosen)
                 execution_results.append(result)
-                history.append(_summarise_step(step_index, action, result))
+                history.append(_summarise_step(step_index, chosen, result))
                 empty_streak = 0
             else:
                 history.append(f"step {step_index}: all {len(proposals)} proposals rejected by Z3")
@@ -207,6 +226,20 @@ class AgentLoop:
         return record
 
     HISTORY_TAIL = 12  # how many recent steps to feed back to the proposer
+    DEDUP_TAIL = 6  # how far back to look when deduplicating proposals
+
+    def _recent_action_keys(self, steps: list[StepRecord]) -> set[str]:
+        """Set of dedup keys for actions executed in the last few steps.
+
+        Used by the ranking step to skip survivors that are exact
+        duplicates of recently-executed actions. Keeps the loop from
+        stalling on a single proposal Claude keeps re-emitting.
+        """
+        keys: set[str] = set()
+        for step in steps[-self.DEDUP_TAIL :]:
+            for action in step.executed:
+                keys.add(_action_dedup_key(action))
+        return keys
 
     def _step_context(self, objective: str, *, history: list[str]) -> StepContext:
         return StepContext(
@@ -232,6 +265,35 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _action_dedup_key(action: Action) -> str:
+    """Stable key for "is this the same action I just ran?".
+
+    Identity-only: ignores headers, body, and other request-shaping
+    fields — two requests to the same URL are the same action even if
+    the body differs slightly. This is intentionally aggressive on the
+    deduplication side; the proposer has plenty of room to vary the
+    URL itself when it wants something distinct.
+    """
+    if action.kind == "request":
+        scheme = "https" if getattr(action, "tls", True) else "http"
+        port = getattr(action, "port", None)
+        port_part = f":{port}" if port is not None else ""
+        target = getattr(action, "target", "")
+        return f"request:{action.method}:{scheme}://{target}{port_part}{action.path}"
+    if action.kind == "probe":
+        return f"probe:{action.target}:{action.aspect}"
+    if action.kind == "compare":
+        a, b = sorted([action.observation_a, action.observation_b])
+        return f"compare:{a}:{b}"
+    if action.kind == "differential":
+        return f"differential:{action.bug_class}:{action.dimension}:{','.join(sorted(action.observations))}"
+    if action.kind == "annotate":
+        return f"annotate:{action.referent}:{hash(action.note)}"
+    if action.kind == "hypothesize":
+        return f"hypothesize:{action.bug_class}:{','.join(sorted(action.evidence_refs))}"
+    return f"{action.kind}:{hash(action.model_dump_json())}"
+
+
 def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> str:
     """One-line history entry the proposer sees on the next step.
 
@@ -249,7 +311,14 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
     if action.kind == "request":
         method = getattr(action, "method", None)
         path = getattr(action, "path", None)
-        parts.append(f"{method} {path}")
+        port = getattr(action, "port", None)
+        tls = getattr(action, "tls", None)
+        # Carry the full URL shape through history so the proposer can
+        # tell working transports from failing ones — plain ``GET /path``
+        # hides whether port=13000 + tls=False were the difference.
+        scheme = "https" if tls else "http"
+        port_part = f":{port}" if port is not None else ""
+        parts.append(f"{method} {scheme}://{target}{port_part}{path}")
         status = result.get("status")
         if status is not None:
             parts.append(f"status={status}")
