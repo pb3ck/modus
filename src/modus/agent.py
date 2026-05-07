@@ -130,6 +130,7 @@ class AgentLoop:
         target_name: str,
         bug_classes: list[str],
         objective: str | None = None,
+        record: SessionRecord | None = None,
     ) -> SessionRecord:
         """Run the loop end-to-end and return the session record.
 
@@ -137,12 +138,23 @@ class AgentLoop:
         proposer can use to bias its sampling — typically the
         bug-class focus expressed as a sentence ("find IDOR on the
         ``demo`` target's user-scoped endpoints").
+
+        ``record`` lets the caller pre-build the
+        :class:`SessionRecord` and hold a reference to it before
+        the loop starts. The loop mutates that same instance in
+        place: ``record.steps`` grows, ``record.termination_reason``
+        and ``record.finished_at`` are written when the loop exits.
+        Used by ``start_autonomous_session`` to expose the
+        in-progress run to ``poll_autonomous_session`` while the
+        loop is still executing as a background task. When omitted
+        (the synchronous path), the loop builds its own record.
         """
-        record = SessionRecord(
-            target_name=target_name,
-            bug_classes=tuple(bug_classes),
-            started_at=_utcnow(),
-        )
+        if record is None:
+            record = SessionRecord(
+                target_name=target_name,
+                bug_classes=tuple(bug_classes),
+                started_at=_utcnow(),
+            )
         objective_text = objective or self._default_objective(target_name, bug_classes)
         empty_streak = 0
         wall_started = time.monotonic()

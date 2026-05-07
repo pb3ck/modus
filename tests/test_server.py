@@ -697,3 +697,288 @@ class TestProposerWarmup:
             ),
         )
         await _warm_proposer_model(session)  # must not raise
+
+
+def _llm_for_async_tests() -> LlmProviderConfig:
+    """Anthropic-shaped config so ``_handle_autonomous_tool`` doesn't
+    bail on the LLM gate; the actual proposer is monkey-patched in
+    the per-test setup so no API call is ever made."""
+    return LlmProviderConfig(
+        provider="anthropic",
+        model=None,
+        api_key="sk-ant-fake",
+        base_url=None,
+    )
+
+
+class TestAsyncAutonomousSession:
+    """Coverage for the start/poll/cancel async-session tools (#1)."""
+
+    async def test_start_returns_session_id_and_registers_handle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        result = await server._dispatch(
+            "start_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["idor"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+            },
+        )
+        assert "session_id" in result
+        assert result["status"] == "running"
+        # Registered on the ServerSession.
+        assert result["session_id"] in session.async_sessions
+        # The session_id is UUID-shaped (lazy check).
+        assert len(result["session_id"]) >= 32
+        # Drain the background task so the test cleans up cleanly.
+        async_session = session.async_sessions[result["session_id"]]
+        await async_session.task
+
+    async def test_poll_returns_step_records_and_advances_cursor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+
+        # Two distinct probes so the loop's strict-dedup ranker has
+        # a non-duplicate survivor each step → two steps execute.
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer(
+                [
+                    Probe(target="target.example.com", aspect="httpx"),
+                    Probe(target="target.example.com", aspect="endpoints"),
+                ]
+            )
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        started = await server._dispatch(
+            "start_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["idor"],
+                "budget": {"max_steps": 2, "max_wall_seconds": 5},
+            },
+        )
+        session_id = started["session_id"]
+        # Wait for the loop to finish so the poll snapshot is fully
+        # populated. In production the host would poll while the
+        # task is still running; both shapes are valid.
+        await session.async_sessions[session_id].task
+
+        # First poll: cursor 0, expect both step records.
+        first = await server._dispatch(
+            "poll_autonomous_session",
+            {"session_id": session_id, "since_step": 0},
+        )
+        assert first["status"] == "completed"
+        assert first["step_count"] == 2
+        assert len(first["new_steps"]) == 2
+        assert [s["step_index"] for s in first["new_steps"]] == [0, 1]
+        assert first["next_cursor"] == 2
+        assert first["termination_reason"] == "step_budget_exhausted"
+
+        # Second poll with the cursor advanced — no new work.
+        second = await server._dispatch(
+            "poll_autonomous_session",
+            {"session_id": session_id, "since_step": first["next_cursor"]},
+        )
+        assert second["status"] == "completed"
+        assert second["new_steps"] == []
+
+    async def test_poll_unknown_session_id_errors(self) -> None:
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+        result = await server._dispatch(
+            "poll_autonomous_session",
+            {"session_id": "00000000-not-a-real-session"},
+        )
+        assert "error" in result
+        assert "00000000-not-a-real-session" in result["error"]
+
+    async def test_cancel_terminates_inflight_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        # Proposer that hangs indefinitely so we can deterministically
+        # cancel mid-run.
+        class _HangingProposer:
+            async def propose(self, context: object) -> list[Any]:
+                await asyncio.Event().wait()
+                return []
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return _HangingProposer()
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        started = await server._dispatch(
+            "start_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["idor"],
+                "budget": {"max_steps": 100, "max_wall_seconds": 60},
+            },
+        )
+        session_id = started["session_id"]
+
+        # Yield once so the task actually starts running before we
+        # cancel; otherwise we'd cancel a not-yet-started task and
+        # the status reporter wouldn't have anything to observe.
+        await asyncio.sleep(0)
+        assert session.async_sessions[session_id].status == "running"
+
+        cancelled = await server._dispatch(
+            "cancel_autonomous_session",
+            {"session_id": session_id},
+        )
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["termination_reason"] == "cancelled"
+        assert cancelled["finished_at"] is not None
+        # The task is settled — calling cancel again is a no-op.
+        again = await server._dispatch(
+            "cancel_autonomous_session",
+            {"session_id": session_id},
+        )
+        assert again["status"] == "cancelled"
+
+    async def test_cancel_on_unknown_id_errors(self) -> None:
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+        result = await server._dispatch(
+            "cancel_autonomous_session",
+            {"session_id": "bogus"},
+        )
+        assert "error" in result
+
+    async def test_cancel_on_completed_session_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        started = await server._dispatch(
+            "start_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["idor"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+            },
+        )
+        session_id = started["session_id"]
+        # Drain naturally.
+        await session.async_sessions[session_id].task
+        # Cancelling a finished session should report completed,
+        # not transition it to cancelled.
+        result = await server._dispatch(
+            "cancel_autonomous_session",
+            {"session_id": session_id},
+        )
+        assert result["status"] == "completed"
+
+    async def test_start_errors_when_no_llm_configured(self) -> None:
+        # Same gate as run_autonomous_session — start hits the LLM
+        # config check before constructing a proposer.
+        server, _session = _server_with(quarry=_FixedCorpusClient(), llm=None)
+        result = await server._dispatch(
+            "start_autonomous_session",
+            {"target": "demo", "bug_classes": ["idor"]},
+        )
+        assert "error" in result
+        assert "MODUS_LLM_PROVIDER" in result["missing"]
+
+    async def test_serversession_aexit_cancels_inflight_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # On server shutdown (ServerSession.__aexit__), any in-flight
+        # async-session tasks must be cancelled and awaited so they
+        # don't leak past the server's lifecycle.
+        import asyncio
+
+        class _HangingProposer:
+            async def propose(self, context: object) -> list[Any]:
+                await asyncio.Event().wait()
+                return []
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=_llm_for_async_tests(),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return _HangingProposer()
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        started = await server._dispatch(
+            "start_autonomous_session",
+            {"target": "demo", "bug_classes": ["idor"]},
+        )
+        session_id = started["session_id"]
+        await asyncio.sleep(0)
+        assert session.async_sessions[session_id].status == "running"
+
+        # Exiting the ServerSession context should cancel the
+        # in-flight task. We invoke the dunder directly here since
+        # the test built the session without `async with`.
+        await session.__aexit__(None, None, None)
+        assert session.async_sessions[session_id].status == "cancelled"

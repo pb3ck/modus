@@ -32,8 +32,10 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mcp import types as mcp_types
@@ -55,7 +57,7 @@ from modus.consistency import ConsistencyChecker, Verdict
 from modus.corpus import CorpusClient, CorpusError
 from modus.executor import HttpExecutor
 from modus.proposer import make_proposer
-from modus.session import ServerSession, SessionCandidate, SessionObservation
+from modus.session import AsyncSession, ServerSession, SessionCandidate, SessionObservation
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,42 +146,89 @@ def _action_input_schema(action_cls: type[Action]) -> dict[str, Any]:
     return schema
 
 
+def _autonomous_session_input_schema() -> dict[str, Any]:
+    """Shared schema for ``run_autonomous_session`` and
+    ``start_autonomous_session`` — same inputs, different return
+    shape (sync result vs session_id handle)."""
+    return {
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "Quarry target name to operate against.",
+            },
+            "bug_classes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Bug classes to focus the search on.",
+            },
+            "objective": {
+                "type": "string",
+                "description": (
+                    "Free-form natural-language framing for the agent's "
+                    "internal proposer. Use this to convey context the "
+                    "scope policy can't carry: the lab's URL and port, "
+                    "the test credentials, the relevant API surface, the "
+                    "operator's hypothesis to test. Optional; a generic "
+                    "default is used when omitted."
+                ),
+            },
+            "budget": {
+                "type": "object",
+                "description": "Optional budget override for the loop.",
+                "properties": {
+                    "max_steps": {"type": "integer", "minimum": 1},
+                    "max_wall_seconds": {"type": "number", "minimum": 1},
+                },
+            },
+        },
+        "required": ["target", "bug_classes"],
+    }
+
+
 def _autonomous_tool_schemas() -> dict[str, dict[str, Any]]:
     """Return inputSchemas for the autonomous-session tools."""
     return {
-        "run_autonomous_session": {
+        "run_autonomous_session": _autonomous_session_input_schema(),
+        "start_autonomous_session": _autonomous_session_input_schema(),
+        "poll_autonomous_session": {
             "type": "object",
             "properties": {
-                "target": {
-                    "type": "string",
-                    "description": "Quarry target name to operate against.",
-                },
-                "bug_classes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Bug classes to focus the search on.",
-                },
-                "objective": {
+                "session_id": {
                     "type": "string",
                     "description": (
-                        "Free-form natural-language framing for the agent's "
-                        "internal proposer. Use this to convey context the "
-                        "scope policy can't carry: the lab's URL and port, "
-                        "the test credentials, the relevant API surface, the "
-                        "operator's hypothesis to test. Optional; a generic "
-                        "default is used when omitted."
+                        "ID returned by ``start_autonomous_session``. "
+                        "Identifies which in-flight run to inspect."
                     ),
                 },
-                "budget": {
-                    "type": "object",
-                    "description": "Optional budget override for the loop.",
-                    "properties": {
-                        "max_steps": {"type": "integer", "minimum": 1},
-                        "max_wall_seconds": {"type": "number", "minimum": 1},
-                    },
+                "since_step": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": (
+                        "Cursor: only step records with step_index >= "
+                        "this value are returned. Set to the index "
+                        "after your last received step to incrementally "
+                        "consume new work; set to 0 (default) to get "
+                        "all step records produced so far."
+                    ),
                 },
             },
-            "required": ["target", "bug_classes"],
+            "required": ["session_id"],
+        },
+        "cancel_autonomous_session": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "ID returned by ``start_autonomous_session``. "
+                        "Cancellation is a no-op on a session that "
+                        "already completed."
+                    ),
+                },
+            },
+            "required": ["session_id"],
         },
         "propose_actions": {
             "type": "object",
@@ -234,11 +283,37 @@ def _build_tool_list() -> list[mcp_types.Tool]:
     autonomous_descriptions = {
         "run_autonomous_session": (
             "Run Modus's autonomous offensive loop end-to-end against a "
-            "Quarry target for a bounded budget. Returns the Candidates "
-            "produced. Requires MODUS_LLM_PROVIDER and the matching "
-            "API key in the server's environment. This is Modus's "
-            "primary surface — call it when you want the agent to do "
-            "the work."
+            "Quarry target for a bounded budget. Returns the full "
+            "session record and Candidates when the loop terminates. "
+            "Synchronous: the call blocks for the entire run, so the "
+            "host's per-tool-call timeout (typically ~60s) caps useful "
+            "wall budgets. For longer runs use ``start_autonomous_session`` "
+            "and poll. Requires MODUS_LLM_PROVIDER."
+        ),
+        "start_autonomous_session": (
+            "Start Modus's autonomous offensive loop as a background "
+            "task and return a session_id immediately. The agent runs "
+            "in the Modus process while the host is free to do other "
+            "work; poll progress with ``poll_autonomous_session(session_id)`` "
+            "and cancel early with ``cancel_autonomous_session(session_id)``. "
+            "This is the right tool for runs that exceed the host's "
+            "per-call timeout — overnight grinds, multi-step recon, "
+            "anything where the budget should bound wall time rather "
+            "than the transport. Requires MODUS_LLM_PROVIDER."
+        ),
+        "poll_autonomous_session": (
+            "Poll an in-flight autonomous session for its current "
+            "status, new step records since the cursor, and the "
+            "Candidates produced this run so far. Sub-second latency; "
+            "safe to call frequently. Status is one of ``running``, "
+            "``completed``, ``cancelled``, or ``failed`` — once it's "
+            "anything but ``running``, no further work will arrive."
+        ),
+        "cancel_autonomous_session": (
+            "Cancel an in-flight autonomous session. Returns the "
+            "session's final state. No-op on a session that already "
+            "completed; the in-flight task is told to stop and the "
+            "loop terminates at the next opportunity."
         ),
         "propose_actions": (
             "Sample N candidate actions for the current corpus state, "
@@ -314,6 +389,35 @@ def _quarry_input_schema(tool_name: str) -> dict[str, Any]:
 _ACTION_ADAPTER: TypeAdapter[Action] = TypeAdapter(Action)
 
 
+_AUTONOMOUS_TOOL_NAMES = frozenset(
+    {
+        "run_autonomous_session",
+        "start_autonomous_session",
+        "poll_autonomous_session",
+        "cancel_autonomous_session",
+        "propose_actions",
+    }
+)
+"""Tool names dispatched into ``_handle_autonomous_tool``. The
+poll and cancel tools don't actually need a proposer — they just
+read or signal an existing background task — but routing them
+through the same handler keeps the LLM-config gate uniform: if
+``MODUS_LLM_PROVIDER`` isn't set, none of these tools work."""
+
+
+_AUTONOMOUS_TOOLS_NEEDING_PROPOSER = frozenset(
+    {
+        "run_autonomous_session",
+        "start_autonomous_session",
+        "propose_actions",
+    }
+)
+"""Subset of autonomous tools that actually instantiate a
+:class:`~modus.proposer.Proposer`. ``poll_autonomous_session`` and
+``cancel_autonomous_session`` operate on already-running tasks
+and do not need a fresh proposer to handle the call."""
+
+
 def _verdict_to_payload(verdict: Verdict) -> dict[str, Any]:
     return {
         "accepted": verdict.accepted,
@@ -357,7 +461,7 @@ class ModusServer:
             return await self._handle_action_tool(name, arguments)
         if name in _QUARRY_PASSTHROUGH_TOOLS:
             return await self._handle_quarry_tool(name, arguments)
-        if name in {"run_autonomous_session", "propose_actions"}:
+        if name in _AUTONOMOUS_TOOL_NAMES:
             return await self._handle_autonomous_tool(name, arguments)
         return {"error": f"unknown tool: {name!r}"}
 
@@ -592,10 +696,20 @@ class ModusServer:
                 "missing": ["MODUS_LLM_PROVIDER"],
             }
 
+        # poll/cancel operate on existing background tasks — no
+        # proposer needed. Dispatch them before we pay the proposer
+        # construction (which can be expensive: AnthropicProposer
+        # opens a real client).
+        if name == "poll_autonomous_session":
+            return self._poll_autonomous_session(arguments)
+        if name == "cancel_autonomous_session":
+            return await self._cancel_autonomous_session(arguments)
+
         # When provider=host, the proposer needs the live MCP session
         # so it can route sampling/createMessage requests back to the
         # host. The session is only available inside a request handler;
-        # we read it from the Server's ContextVar.
+        # we read it from the Server's ContextVar. start/run/propose
+        # all need this; poll/cancel don't (handled above).
         host_mcp_session: Any = None
         if self.session.llm.provider == "host" and self._mcp_server is not None:
             try:
@@ -620,6 +734,8 @@ class ModusServer:
 
         if name == "run_autonomous_session":
             return await self._run_autonomous_session(proposer, arguments)
+        if name == "start_autonomous_session":
+            return self._start_autonomous_session(proposer, arguments)
         if name == "propose_actions":
             return await self._propose_actions(proposer, arguments)
         return {"error": f"unknown autonomous tool: {name!r}"}
@@ -660,6 +776,163 @@ class ModusServer:
                 for c in self.session.candidates
             ],
         }
+
+    def _start_autonomous_session(self, proposer: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Kick off ``AgentLoop.run`` as a detached asyncio task.
+
+        Returns immediately with a ``session_id`` the host can poll
+        via ``poll_autonomous_session`` or cancel via
+        ``cancel_autonomous_session``. The background task mutates
+        the :class:`SessionRecord` in place; the poll handler reads
+        that mutating state under no lock — Python's GIL makes the
+        reads safe enough for our purposes (we only ever append to
+        ``record.steps`` from the loop, never reorder or rewrite).
+        """
+        from modus.agent import AgentLoop, Budget, SessionRecord
+
+        target = str(arguments.get("target") or self.session.scope.target_name)
+        bug_classes = list(arguments.get("bug_classes") or [])
+        objective_arg = arguments.get("objective")
+        objective: str | None = (
+            str(objective_arg) if isinstance(objective_arg, str) and objective_arg else None
+        )
+        budget_args = dict(arguments.get("budget") or {})
+        budget = Budget(
+            max_steps=int(budget_args.get("max_steps", Budget().max_steps)),
+            max_wall_seconds=float(budget_args.get("max_wall_seconds", Budget().max_wall_seconds)),
+        )
+
+        started_at = datetime.now(UTC)
+        record = SessionRecord(
+            target_name=target,
+            bug_classes=tuple(bug_classes),
+            started_at=started_at,
+        )
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=self.checker,
+            session=self.session,
+            execute_action=self._execute_action_for_loop,
+            budget=budget,
+        )
+        # The task closure captures ``record`` and the loop; the
+        # AgentLoop will mutate ``record`` in place as steps land.
+        task = asyncio.create_task(
+            loop.run(
+                target_name=target,
+                bug_classes=bug_classes,
+                objective=objective,
+                record=record,
+            )
+        )
+
+        session_id = str(uuid.uuid4())
+        async_session = AsyncSession(
+            session_id=session_id,
+            target_name=target,
+            bug_classes=tuple(bug_classes),
+            started_at=started_at,
+            record=record,
+            task=task,
+            candidate_start_index=len(self.session.candidates),
+        )
+        self.session.async_sessions[session_id] = async_session
+        return {
+            "session_id": session_id,
+            "started_at": started_at.isoformat(),
+            "target_name": target,
+            "bug_classes": list(bug_classes),
+            "status": "running",
+        }
+
+    def _poll_autonomous_session(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Snapshot an in-flight (or completed) async session.
+
+        Returns the session's current status, the step records with
+        ``step_index >= since_step``, and the slice of
+        ``ServerSession.candidates`` produced during this run.
+        Sub-second; safe to poll frequently.
+        """
+        session_id = str(arguments.get("session_id") or "")
+        async_session = self.session.async_sessions.get(session_id)
+        if async_session is None:
+            return {
+                "error": f"unknown session_id: {session_id!r}",
+                "known_sessions": list(self.session.async_sessions.keys()),
+            }
+
+        since_step = int(arguments.get("since_step") or 0)
+        # ``record.steps`` is mutated by the background task; we
+        # snapshot its length first and slice deterministically so
+        # a step that lands mid-poll doesn't tear the response.
+        steps_snapshot = list(async_session.record.steps)
+        new_steps = [s for s in steps_snapshot if s.step_index >= since_step]
+        next_cursor = max((s.step_index for s in steps_snapshot), default=since_step - 1) + 1
+
+        # Per-run candidates: anything appended to
+        # ``session.candidates`` after this run started. Slicing is
+        # safe because the candidate list only ever grows.
+        run_candidates = list(self.session.candidates[async_session.candidate_start_index :])
+
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "status": async_session.status,
+            "started_at": async_session.started_at.isoformat(),
+            "target_name": async_session.target_name,
+            "bug_classes": list(async_session.bug_classes),
+            "step_count": len(steps_snapshot),
+            "next_cursor": next_cursor,
+            "new_steps": [
+                {
+                    "step_index": s.step_index,
+                    "started_at": s.started_at.isoformat(),
+                    "finished_at": (s.finished_at.isoformat() if s.finished_at else None),
+                    "proposal_count": len(s.proposals),
+                    "rejected_count": sum(1 for v in s.verdicts if not v.accepted),
+                    "executed": [a.model_dump() for a in s.executed],
+                    "execution_results": list(s.execution_results),
+                }
+                for s in new_steps
+            ],
+            "candidates": [
+                {
+                    "bug_class": c.bug_class,
+                    "evidence_refs": list(c.evidence_refs),
+                    "rationale": c.rationale,
+                    "severity_hint": c.severity_hint,
+                }
+                for c in run_candidates
+            ],
+        }
+        if async_session.task.done():
+            payload["finished_at"] = (
+                async_session.record.finished_at.isoformat()
+                if async_session.record.finished_at
+                else None
+            )
+            payload["termination_reason"] = async_session.record.termination_reason
+            err = async_session.error_message()
+            if err is not None:
+                payload["error"] = err
+        return payload
+
+    async def _cancel_autonomous_session(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Cancel an in-flight async session.
+
+        No-op on a session that already completed. Awaits the
+        task's settle so the caller knows the loop has actually
+        stopped before the response returns.
+        """
+        session_id = str(arguments.get("session_id") or "")
+        async_session = self.session.async_sessions.get(session_id)
+        if async_session is None:
+            return {
+                "error": f"unknown session_id: {session_id!r}",
+                "known_sessions": list(self.session.async_sessions.keys()),
+            }
+        await async_session.cancel()
+        # Re-use the poll snapshot for the final state.
+        return self._poll_autonomous_session({"session_id": session_id, "since_step": 0})
 
     async def _propose_actions(self, proposer: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         from modus.proposer import StepContext

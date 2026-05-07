@@ -14,10 +14,12 @@ scope is the operator's path to working on a different target.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from modus.consistency import CorpusState
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from types import TracebackType
     from typing import Any
 
+    from modus.agent import SessionRecord
     from modus.scope import ScopePolicy
 
 
@@ -153,6 +156,102 @@ class SessionCandidate:
 
 
 @dataclass
+class AsyncSession:
+    """An autonomous-session run executing as a background task.
+
+    Created by ``start_autonomous_session``, polled by
+    ``poll_autonomous_session``, optionally terminated early by
+    ``cancel_autonomous_session``. The agent loop runs as a detached
+    asyncio task that mutates :attr:`record` in place; the poll
+    handler snapshots the current state and returns the new step
+    records and Candidates since the operator's cursor.
+
+    Lives in :attr:`ServerSession.async_sessions` until the server
+    shuts down (no GC at v0.1).
+
+    See :issue:`1` for the design context: this exists to escape the
+    MCP host's per-tool-call timeout (~60s on Claude Desktop and
+    Claude Code), which would otherwise cap the autonomous loop's
+    wall budget at one host-handshake worth of work.
+    """
+
+    session_id: str
+    target_name: str
+    bug_classes: tuple[str, ...]
+    started_at: datetime
+    record: SessionRecord  # mutated in place by AgentLoop.run
+    task: asyncio.Task[SessionRecord]
+    candidate_start_index: int
+    """Cursor into ``ServerSession.candidates`` taken at this run's
+    start. Per-run candidates are
+    ``session.candidates[candidate_start_index:]`` once the loop
+    has had a chance to author them."""
+    cancelled: bool = False
+    """Set to ``True`` by :meth:`cancel` before
+    ``asyncio.Task.cancel`` so the status reporter can distinguish
+    operator-initiated cancellation from a CancelledError that came
+    from elsewhere."""
+
+    @property
+    def status(self) -> str:
+        """One of ``running``, ``completed``, ``cancelled``, ``failed``."""
+        if not self.task.done():
+            return "running"
+        if self.cancelled or self.task.cancelled():
+            return "cancelled"
+        try:
+            exc = self.task.exception()
+        except asyncio.CancelledError:
+            return "cancelled"
+        if exc is not None:
+            return "failed"
+        return "completed"
+
+    def error_message(self) -> str | None:
+        """Short human-readable error string if the task failed.
+
+        ``None`` if the task is still running, completed cleanly,
+        or was cancelled. Surfaced to the host via the poll tool's
+        result so the operator can see what blew up.
+        """
+        if not self.task.done() or self.task.cancelled() or self.cancelled:
+            return None
+        try:
+            exc = self.task.exception()
+        except asyncio.CancelledError:
+            return None
+        if exc is None:
+            return None
+        return f"{type(exc).__name__}: {exc}"
+
+    async def cancel(self) -> None:
+        """Cancel the running task and wait for it to settle.
+
+        Safe to call on a session that already completed (no-op).
+        After this returns, :attr:`status` is ``cancelled``,
+        ``completed``, or ``failed`` depending on whether the
+        cancellation arrived in time.
+
+        When the cancellation aborts ``AgentLoop.run`` mid-step,
+        the loop's normal exit code (which writes
+        ``termination_reason`` and ``finished_at`` on the record)
+        does not run. We patch those fields here so the polled
+        record reflects a clean cancelled state instead of dangling
+        ``None``s.
+        """
+        if self.task.done():
+            return
+        self.cancelled = True
+        self.task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await self.task
+        if self.record.termination_reason is None:
+            self.record.termination_reason = "cancelled"
+        if self.record.finished_at is None:
+            self.record.finished_at = datetime.now(UTC)
+
+
+@dataclass
 class ServerSession:
     """Holds the running MCP server's per-process state.
 
@@ -167,6 +266,11 @@ class ServerSession:
     quarry_launch: QuarryLaunchConfig = field(default_factory=QuarryLaunchConfig.from_env)
     observations: list[SessionObservation] = field(default_factory=list)
     candidates: list[SessionCandidate] = field(default_factory=list)
+    async_sessions: dict[str, AsyncSession] = field(default_factory=dict)
+    """Registry of in-flight (or completed-but-not-collected)
+    autonomous-session runs started by ``start_autonomous_session``.
+    The poll and cancel tools look sessions up by ID. Lives until
+    the server shuts down; not GC'd at v0.1."""
 
     async def __aenter__(self) -> ServerSession:
         return self
@@ -177,8 +281,12 @@ class ServerSession:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        # Per-call Quarry clients clean themselves up; nothing to do.
-        pass
+        # Cancel any in-flight async sessions so background tasks
+        # don't outlive the server. Best-effort: we await each
+        # cancellation but suppress exceptions — shutdown should
+        # never block on a stuck task.
+        for s in list(self.async_sessions.values()):
+            await s.cancel()
 
     @asynccontextmanager
     async def with_quarry(self) -> AsyncIterator[QuarryMcpClient]:
