@@ -1,0 +1,14 @@
+# Authors
+
+Modus is maintained by:
+
+- Paul Beck
+
+Contributions from others, once the project opens up to them, will
+be acknowledged here.
+
+The architectural thesis (typed action vocabulary, formal consistency
+checking, corpus-as-audit-surface, human-promoted findings) was
+developed in conversation with Claude (Anthropic), which also
+contributed to the initial repository scaffolding. Code-level
+contributions are tracked in git history.

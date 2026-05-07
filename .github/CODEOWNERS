@@ -1,0 +1,7 @@
+# CODEOWNERS for Modus
+#
+# This file defines who is requested for review on changes to
+# specific paths. Until the project opens to outside contributors
+# the maintainer owns everything.
+
+* @pb3ck
