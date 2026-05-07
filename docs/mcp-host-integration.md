@@ -105,6 +105,33 @@ provider-specific env. Cursor, Continue, Zed, and the various
 custom MCP-client agents have their own config files; consult
 their docs for where to put the snippet above.
 
+## Pointing Modus at a containerised Quarry
+
+By default Modus spawns ``quarry mcp`` directly on the host, expecting
+the binary on ``PATH`` and a corpus at ``$QUARRY_HOME`` (or
+``~/.quarry``). Operators whose Quarry runs in a container (Exegol,
+Docker, etc.) override the spawn command via env:
+
+| Env var | Purpose |
+|---|---|
+| ``MODUS_QUARRY_COMMAND`` | The binary Modus invokes to start the Quarry MCP subprocess. Defaults to ``quarry``. |
+| ``MODUS_QUARRY_ARGS`` | The arguments, shell-quoted (``shlex``-parsed). Defaults to ``mcp`` when ``MODUS_QUARRY_COMMAND`` is the default. |
+
+Example: Quarry running inside an Exegol container, where the host
+talks to it via ``docker exec``:
+
+```json
+"env": {
+  "MODUS_QUARRY_COMMAND": "docker",
+  "MODUS_QUARRY_ARGS": "exec -i -e QUARRY_HOME=/workspace/.quarry exegol-default /root/.cargo/bin/quarry mcp"
+}
+```
+
+Modus speaks MCP stdio with whatever process this command spawns,
+the same way it would if it had launched a host-side ``quarry``
+binary. The corpus is whatever the launched Quarry sees — Modus
+doesn't care which side of the container boundary it lives on.
+
 ## Picking the Modus-internal LLM provider
 
 Modus's autonomous loop uses its own LLM provider, separate

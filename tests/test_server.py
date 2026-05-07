@@ -361,3 +361,47 @@ class TestLlmProviderConfig:
     def test_unknown_provider_rejected(self) -> None:
         with pytest.raises(ValueError):
             LlmProviderConfig.from_env({"MODUS_LLM_PROVIDER": "made-up"})
+
+
+class TestQuarryLaunchConfig:
+    def test_default_is_quarry_mcp(self) -> None:
+        from modus.session import QuarryLaunchConfig
+
+        cfg = QuarryLaunchConfig.from_env({})
+        assert cfg.command == "quarry"
+        assert cfg.args == ("mcp",)
+
+    def test_docker_exec_override(self) -> None:
+        from modus.session import QuarryLaunchConfig
+
+        cfg = QuarryLaunchConfig.from_env(
+            {
+                "MODUS_QUARRY_COMMAND": "docker",
+                "MODUS_QUARRY_ARGS": (
+                    "exec -i -e QUARRY_HOME=/workspace/.quarry "
+                    "exegol-default /root/.cargo/bin/quarry mcp"
+                ),
+            }
+        )
+        assert cfg.command == "docker"
+        assert cfg.args[0] == "exec"
+        assert "/root/.cargo/bin/quarry" in cfg.args
+        assert cfg.args[-1] == "mcp"
+
+    def test_explicit_empty_args_when_command_overridden(self) -> None:
+        from modus.session import QuarryLaunchConfig
+
+        cfg = QuarryLaunchConfig.from_env({"MODUS_QUARRY_COMMAND": "/custom/quarry-launcher.sh"})
+        assert cfg.command == "/custom/quarry-launcher.sh"
+        assert cfg.args == ()
+
+    def test_args_use_shlex_quoting(self) -> None:
+        from modus.session import QuarryLaunchConfig
+
+        cfg = QuarryLaunchConfig.from_env(
+            {
+                "MODUS_QUARRY_COMMAND": "wrapper",
+                "MODUS_QUARRY_ARGS": '--flag "a value with spaces" mcp',
+            }
+        )
+        assert cfg.args == ("--flag", "a value with spaces", "mcp")

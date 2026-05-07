@@ -15,6 +15,7 @@ scope is the operator's path to working on a different target.
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,32 @@ if TYPE_CHECKING:
     from typing import Any
 
     from modus.scope import ScopePolicy
+
+
+@dataclass(frozen=True)
+class QuarryLaunchConfig:
+    """How to spawn the Quarry MCP server subprocess.
+
+    Defaults to running ``quarry mcp`` on the host. Operators whose
+    Quarry runs inside a container (Exegol, Docker) override via
+    ``MODUS_QUARRY_COMMAND`` and ``MODUS_QUARRY_ARGS`` to spawn it
+    through ``docker exec`` or any other shim — Modus stays
+    transport-agnostic.
+    """
+
+    command: str
+    args: tuple[str, ...]
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> QuarryLaunchConfig:
+        env = env if env is not None else dict(os.environ)
+        command = env.get("MODUS_QUARRY_COMMAND") or "quarry"
+        raw_args = env.get("MODUS_QUARRY_ARGS")
+        if raw_args is None:
+            args: tuple[str, ...] = ("mcp",) if command == "quarry" else ()
+        else:
+            args = tuple(shlex.split(raw_args))
+        return cls(command=command, args=args)
 
 
 @dataclass(frozen=True)
@@ -117,6 +144,7 @@ class ServerSession:
 
     scope: ScopePolicy
     llm: LlmProviderConfig | None
+    quarry_launch: QuarryLaunchConfig = field(default_factory=QuarryLaunchConfig.from_env)
     _quarry: QuarryMcpClient | None = field(default=None, init=False, repr=False)
     _quarry_stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
     observations: list[SessionObservation] = field(default_factory=list)
@@ -148,7 +176,10 @@ class ServerSession:
         from contextlib import AsyncExitStack
 
         stack = AsyncExitStack()
-        client = QuarryMcpClient()
+        client = QuarryMcpClient(
+            command=self.quarry_launch.command,
+            args=self.quarry_launch.args,
+        )
         try:
             await stack.enter_async_context(client)
         except Exception:
@@ -178,14 +209,19 @@ class ServerSession:
     def from_scope_file(
         cls, scope_path: Path, *, env: dict[str, str] | None = None
     ) -> ServerSession:
-        """Load a scope policy from disk and resolve LLM config from env."""
+        """Load a scope policy from disk and resolve LLM + Quarry config from env."""
         from modus.scope import ScopePolicy
 
-        return cls(scope=ScopePolicy.from_json(scope_path), llm=LlmProviderConfig.from_env(env))
+        return cls(
+            scope=ScopePolicy.from_json(scope_path),
+            llm=LlmProviderConfig.from_env(env),
+            quarry_launch=QuarryLaunchConfig.from_env(env),
+        )
 
 
 __all__ = [
     "LlmProviderConfig",
+    "QuarryLaunchConfig",
     "ServerSession",
     "SessionCandidate",
     "SessionObservation",
