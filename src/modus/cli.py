@@ -6,12 +6,15 @@ Subcommands land alongside the milestones in ROADMAP.md:
 * ``modus action validate <spec.json>`` — Milestone 1 deliverable;
   runs the consistency layer against a static action + state spec
   and prints a per-action verdict.
+* ``modus corpus status`` — Milestone 2 deliverable; opens a Quarry
+  MCP session, prints schema version and per-entity counts, exits.
 * ``modus run`` — Milestone 4 deliverable; launches the autonomous
   agent loop. Currently a stub that explains what it would do.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -25,6 +28,12 @@ from rich.table import Table
 from modus import __version__
 from modus.actions import Action
 from modus.consistency import ConsistencyChecker, CorpusState
+from modus.corpus import (
+    CorpusError,
+    CorpusToolsMissingError,
+    CorpusUnavailableError,
+    QuarryMcpClient,
+)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -89,6 +98,92 @@ def action_validate(spec: Path, as_json: bool) -> None:
 
     rejected = sum(1 for _, verdict in results if not verdict.accepted)
     sys.exit(1 if rejected else 0)
+
+
+@main.group()
+def corpus() -> None:
+    """Inspect the Quarry corpus Modus is reading from."""
+
+
+@corpus.command("status")
+@click.option(
+    "--quarry",
+    "quarry_command",
+    default="quarry",
+    show_default=True,
+    help="Path to the Quarry binary. Must be on PATH or absolute.",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    default=10.0,
+    show_default=True,
+    type=float,
+    help="Per-call timeout in seconds.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit machine-readable JSON instead of the human table.",
+)
+def corpus_status(quarry_command: str, timeout_seconds: float, as_json: bool) -> None:
+    """Print Quarry corpus status.
+
+    Opens a fresh ``quarry mcp`` subprocess, runs the MCP initialize
+    handshake, calls the ``status`` tool, prints the result, and
+    exits. Useful as a sanity check that Modus can reach Quarry
+    before launching an agent session.
+    """
+    sys.exit(asyncio.run(_corpus_status(quarry_command, timeout_seconds, as_json)))
+
+
+async def _corpus_status(quarry_command: str, timeout_seconds: float, as_json: bool) -> int:
+    client = QuarryMcpClient(command=quarry_command, call_timeout_seconds=timeout_seconds)
+    try:
+        async with client:
+            status_result = await client.status()
+    except CorpusUnavailableError as exc:
+        err_console.print(f"[red]corpus unavailable:[/red] {exc}")
+        return 3
+    except CorpusToolsMissingError as exc:
+        err_console.print(f"[red]Quarry schema mismatch:[/red] {exc}")
+        return 4
+    except CorpusError as exc:
+        err_console.print(f"[red]corpus error:[/red] {exc}")
+        return 5
+
+    if as_json:
+        console.print_json(
+            data={
+                "schema_version": status_result.schema_version,
+                "current_target": status_result.current_target,
+                "targets": status_result.targets,
+                "assets": status_result.assets,
+                "runs": status_result.runs,
+                "artifacts": status_result.artifacts,
+                "evidence": status_result.evidence,
+                "findings": status_result.findings,
+                "sessions": status_result.sessions,
+                "last_run_started_at": status_result.last_run_started_at,
+            }
+        )
+    else:
+        table = Table(title="Quarry corpus status")
+        table.add_column("field")
+        table.add_column("value", overflow="fold")
+        table.add_row("schema_version", str(status_result.schema_version))
+        table.add_row("current_target", status_result.current_target or "(none)")
+        table.add_row("targets", str(status_result.targets))
+        table.add_row("assets", str(status_result.assets))
+        table.add_row("runs", str(status_result.runs))
+        table.add_row("artifacts", str(status_result.artifacts))
+        table.add_row("evidence", str(status_result.evidence))
+        table.add_row("findings", str(status_result.findings))
+        table.add_row("sessions", str(status_result.sessions))
+        table.add_row("last_run_started_at", status_result.last_run_started_at or "(none)")
+        console.print(table)
+    return 0
 
 
 @main.command("run")

@@ -30,8 +30,17 @@ notice.
   (`src/modus/consistency.py`).
 - `ScopePolicy` model for operator-defined scope envelopes
   (`src/modus/scope.py`).
-- `CorpusClient` protocol + `QuarryMcpClient` stub +
-  `StubCorpusClient` for tests (`src/modus/corpus.py`).
+- `CorpusClient` protocol, real `QuarryMcpClient` (drives
+  `quarry mcp` over MCP stdio JSON-RPC, verifies the required tool
+  surface on connect, parses every tool result into pinned Python
+  types where Quarry's schema is stable and into raw dicts where
+  it's flagged as in-flux), and `StubCorpusClient` for tests
+  (`src/modus/corpus.py`). Includes the full corpus error
+  hierarchy: `CorpusUnavailableError` for spawn failures,
+  `CorpusToolsMissingError` for schema mismatches,
+  `CorpusToolError` for tool-side failures, `CorpusTimeoutError`
+  for per-call timeouts, `CorpusSchemaError` for malformed
+  payloads.
 - `Proposer` protocol + `AnthropicProposer` skeleton (cache zones
   pinned) + deterministic `FixedProposer` for tests
   (`src/modus/proposer.py`).
@@ -39,9 +48,19 @@ notice.
   per-step context wiring (`src/modus/agent.py`).
 - `modus action validate` CLI subcommand wired to the consistency
   layer; runs end-to-end on a JSON spec file.
+- `modus corpus status` CLI subcommand: opens a Quarry MCP
+  session, prints schema version and per-entity counts, exits
+  with distinct codes for each corpus failure category.
 - `modus run` CLI subcommand stubbed pending Milestone 4.
 - Tests for action vocabulary, consistency layer, scope policy,
-  and CLI surface.
+  CLI surface, and the corpus client. The corpus contract tests
+  drive a duck-typed fake `mcp.ClientSession` through the same
+  code path the real session flows through, exercising tool
+  verification, payload parsing, error mapping, and timeout
+  behaviour without requiring Quarry to be installed.
+- `pytest -m integration` opt-in test marker for tests that
+  drive a real `quarry mcp` subprocess against a tmpdir corpus.
+  Skipped by default; documented in `CONTRIBUTING.md`.
 
 ### Changed
 

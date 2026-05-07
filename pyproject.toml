@@ -124,6 +124,11 @@ addopts = [
     "--strict-config",
     "--cov=modus",
     "--cov-report=term-missing",
+    "-m",
+    "not integration",
+]
+markers = [
+    "integration: opt-in tests that drive a real `quarry mcp` subprocess. Skipped by default; run with `pytest -m integration`.",
 ]
 
 [tool.coverage.run]

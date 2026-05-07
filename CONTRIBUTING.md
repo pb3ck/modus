@@ -45,6 +45,12 @@ In rough priority order:
   test and one negative test. Every consistency-check rule has
   at least one test that demonstrates the rule firing and at least
   one that demonstrates it not firing on a similar-but-valid case.
+- Integration tests that drive a real `quarry mcp` subprocess are
+  marked `@pytest.mark.integration` and skipped by default. Run
+  them locally with `pytest -m integration`. They require the
+  `quarry` binary on `PATH` (or in `MODUS_QUARRY_BIN`) and seed a
+  fresh corpus in a tmpdir per test, so they are safe to run
+  alongside an existing `~/.quarry/` corpus.
 
 ## Commit style
 
