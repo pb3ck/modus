@@ -28,9 +28,11 @@ the host's conversation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from contextlib import AsyncExitStack
+import time
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -753,6 +755,53 @@ def _candidates_to_payload(candidates: list[Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------- entry point
 
 
+async def _warm_proposer_model(session: ServerSession) -> None:
+    """Best-effort prime of the proposer's LLM at server startup.
+
+    The first inference call to a fresh Ollama / vLLM endpoint pays
+    the model-load cost (~30-45s for 9-14B Q4 models on consumer
+    Apple Silicon, smaller for hosted APIs). Subsequent calls are
+    dramatically faster. Sending one tiny throwaway completion now
+    moves that cost out of the operator's first
+    ``run_autonomous_session`` invocation, so the autonomous-loop
+    budget covers actual work instead of the model-load tax.
+
+    Called as a background task by :func:`serve` — never blocks
+    server startup. Always best-effort: any failure (network down,
+    model not present, schema mismatch, anything) is logged at info
+    level and otherwise ignored. Warming is opportunistic, not
+    required.
+
+    Skips when:
+      * ``session.llm`` is unset (no provider configured).
+      * ``session.llm.provider == "host"`` — host-sampling proposers
+        call back into the MCP host's LLM, which is already warm.
+    """
+    if session.llm is None or session.llm.provider == "host":
+        return
+    try:
+        proposer = make_proposer(llm=session.llm, scope=session.scope)
+        # Direct call to the abstract _complete with a minimal
+        # prompt — we only care that the model loads, not what
+        # it returns. The full proposer prompt would do too, but
+        # there's no need to spend the tokens.
+        started = time.monotonic()
+        await proposer._complete("", "ok")  # type: ignore[attr-defined]
+        elapsed = time.monotonic() - started
+        _LOG.info(
+            "proposer model warmed in %.1fs (provider=%s, model=%s)",
+            elapsed,
+            session.llm.provider,
+            session.llm.model or "<default>",
+        )
+    except Exception as exc:  # broad: warmup failures must never crash startup
+        _LOG.info(
+            "proposer model warmup skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
 async def serve(scope_path: Path) -> int:
     """Run the MCP server until the host disconnects.
 
@@ -788,9 +837,19 @@ async def serve(scope_path: Path) -> int:
             HttpExecutor(user_agent=session.scope.user_agent)
         )
         modus = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
-        server = modus._server()
-        async with stdio_server() as (read, write):
-            await server.run(read, write, server.create_initialization_options())
+        # Pre-warm the proposer's model in the background so the
+        # first autonomous-session call doesn't pay the cold-load
+        # cost. Best-effort; never blocks startup, never fatal.
+        warmup_task = asyncio.create_task(_warm_proposer_model(session))
+        try:
+            server = modus._server()
+            async with stdio_server() as (read, write):
+                await server.run(read, write, server.create_initialization_options())
+        finally:
+            if not warmup_task.done():
+                warmup_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await warmup_task
     return 0
 
 

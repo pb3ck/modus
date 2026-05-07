@@ -648,3 +648,52 @@ class TestQuarryLaunchConfig:
             }
         )
         assert cfg.args == ("--flag", "a value with spaces", "mcp")
+
+
+class TestProposerWarmup:
+    """Coverage for the startup pre-warm of the Modus-side LLM (#3)."""
+
+    async def test_skips_silently_when_llm_unset(self) -> None:
+        # No provider configured; warmup must do nothing and return.
+        from modus.server import _warm_proposer_model
+
+        session = ServerSession(scope=_scope(), llm=None)
+        # Should not raise, should not block. No assertion needed
+        # beyond "returns cleanly."
+        await _warm_proposer_model(session)
+
+    async def test_skips_for_host_provider(self) -> None:
+        # Host-sampling proposers call back into the MCP host's LLM;
+        # we can't pre-warm something we don't own. Must skip.
+        from modus.server import _warm_proposer_model
+
+        session = ServerSession(
+            scope=_scope(),
+            llm=LlmProviderConfig(
+                provider="host",
+                model=None,
+                api_key=None,
+                base_url=None,
+            ),
+        )
+        await _warm_proposer_model(session)
+
+    async def test_provider_failure_is_swallowed(self) -> None:
+        # Point at an unreachable base_url. The openai-compatible
+        # client will fail to connect; warmup must catch and log,
+        # never propagate. Server startup cannot be brittle on
+        # warmup failure.
+        from modus.server import _warm_proposer_model
+
+        session = ServerSession(
+            scope=_scope(),
+            llm=LlmProviderConfig(
+                provider="openai-compatible",
+                model="fake-model",
+                api_key="fake",
+                # Port 1 is reserved/unavailable on every reasonable
+                # system — guaranteed connection refused.
+                base_url="http://127.0.0.1:1/v1",
+            ),
+        )
+        await _warm_proposer_model(session)  # must not raise
