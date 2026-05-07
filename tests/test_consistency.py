@@ -313,14 +313,14 @@ class TestHypothesizeConsistency:
 
 
 class TestToolPlaceholder:
-    """Tool actions validate at the grammar level (#6) but are
-    rejected by the consistency layer until #9 lands the registry-
-    driven dispatch. Verifies the placeholder gate so the agent
-    loop can't accidentally execute a Tool emission before the
-    executor is wired.
+    """Tool actions are placeholder-rejected when the
+    ``ConsistencyChecker`` has no registry/scope wired — the
+    backward-compatible code path tests and the CLI go through.
+    Verifies the agent loop can't accidentally execute a Tool
+    emission against an unconfigured checker.
     """
 
-    def test_tool_action_rejected_with_placeholder_label(self) -> None:
+    def test_tool_action_rejected_when_no_registry(self) -> None:
         from modus.actions import Tool
 
         verdict = ConsistencyChecker().check(
@@ -329,6 +329,135 @@ class TestToolPlaceholder:
         )
         assert not verdict.accepted
         assert "tool_dispatch_not_yet_implemented" in verdict.failed_preconditions
+
+
+class TestToolRegistryDispatch:
+    """Registry-driven dispatch (#9) — when the checker holds a
+    scope and a registry, Tool actions go through the spec's
+    per-tool preconditions instead of the placeholder rejection.
+    """
+
+    def _setup(
+        self,
+        *,
+        preconditions=None,  # type: ignore[no-untyped-def]
+        args_schema=None,  # type: ignore[no-untyped-def]
+    ) -> tuple[ConsistencyChecker, object]:
+        # Local imports keep the test module's top-level imports
+        # narrow.
+        from modus.scope import ScopePolicy
+        from modus.tools import ShellInvocation, ToolRegistry, ToolSpec
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        registry = ToolRegistry()
+        spec = ToolSpec(
+            name="amass.enum",
+            kind="shell",
+            description="recon",
+            args_schema=args_schema
+            or {
+                "type": "object",
+                "properties": {"domain": {"type": "string"}},
+                "required": ["domain"],
+            },
+            side_effect="active",
+            invocation=ShellInvocation(argv_template=("amass", "enum", "-d", "{domain}")),
+            preconditions=preconditions or _accept_all,
+        )
+        registry.register(spec)
+        return ConsistencyChecker(scope=scope, registry=registry), spec
+
+    def test_registered_tool_with_passing_preconditions_accepts(self) -> None:
+        from modus.actions import Tool
+
+        checker, _spec = self._setup()
+        verdict = checker.check(
+            Tool(name="amass.enum", args={"domain": "target.example.com"}),
+            _scoped_state(),
+        )
+        assert verdict.accepted, verdict.rationale
+
+    def test_unregistered_tool_rejected(self) -> None:
+        from modus.actions import Tool
+
+        checker, _spec = self._setup()
+        verdict = checker.check(
+            Tool(name="not-registered", args={}),
+            _scoped_state(),
+        )
+        assert not verdict.accepted
+        assert "tool_registered:not-registered" in verdict.failed_preconditions
+
+    def test_missing_required_arg_rejected_with_specific_label(self) -> None:
+        from modus.actions import Tool
+
+        checker, _spec = self._setup()
+        verdict = checker.check(
+            Tool(name="amass.enum", args={}),  # missing required `domain`
+            _scoped_state(),
+        )
+        assert not verdict.accepted
+        assert "tool_args_missing_required:amass.enum:domain" in verdict.failed_preconditions
+
+    def test_unknown_field_rejected_when_additional_properties_false(self) -> None:
+        from modus.actions import Tool
+
+        checker, _spec = self._setup(
+            args_schema={
+                "type": "object",
+                "properties": {"domain": {"type": "string"}},
+                "required": ["domain"],
+                "additionalProperties": False,
+            },
+        )
+        verdict = checker.check(
+            Tool(
+                name="amass.enum",
+                args={"domain": "target.example.com", "rogue": "field"},
+            ),
+            _scoped_state(),
+        )
+        assert not verdict.accepted
+        assert "tool_args_unknown_field:amass.enum:rogue" in verdict.failed_preconditions
+
+    def test_per_tool_preconditions_evaluated(self) -> None:
+        # The spec's preconditions function is called with
+        # ``(args, scope, state)`` and its results are wired into
+        # the Z3 layer. Use a fn that rejects when domain isn't in
+        # scope.allowed_assets.
+        from modus.actions import Tool
+
+        def domain_in_scope(
+            args: dict[str, object], scope: object, state: object
+        ) -> list[tuple[str, bool]]:
+            domain = str(args.get("domain", ""))
+            return [(f"domain_in_scope:{domain}", domain in scope.allowed_assets)]  # type: ignore[attr-defined]
+
+        checker, _spec = self._setup(preconditions=domain_in_scope)
+
+        # In-scope domain → accepted.
+        v_ok = checker.check(
+            Tool(name="amass.enum", args={"domain": "target.example.com"}),
+            _scoped_state(),
+        )
+        assert v_ok.accepted
+
+        # Out-of-scope domain → rejected with the spec's label.
+        v_bad = checker.check(
+            Tool(name="amass.enum", args={"domain": "evil.example.com"}),
+            _scoped_state(),
+        )
+        assert not v_bad.accepted
+        assert "domain_in_scope:evil.example.com" in v_bad.failed_preconditions
+
+
+def _accept_all(args: dict[str, object], scope: object, state: object) -> list[tuple[str, bool]]:
+    """Per-tool preconditions stub for tests that don't care about
+    the spec's specific gating — accepts everything."""
+    return []
 
 
 class TestPruneBatch:

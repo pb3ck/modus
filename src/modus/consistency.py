@@ -24,7 +24,7 @@ the public surface is :meth:`ConsistencyChecker.prune`, which takes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import z3
 
@@ -40,7 +40,8 @@ from modus.actions import (
 )
 
 if TYPE_CHECKING:
-    from modus.scope import AllowedEndpoint
+    from modus.scope import AllowedEndpoint, ScopePolicy
+    from modus.tools import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class Verdict:
 _Precondition = tuple[str, bool]
 
 
+@dataclass
 class ConsistencyChecker:
     """Verifier over proposed actions.
 
@@ -121,10 +123,30 @@ class ConsistencyChecker:
       * :meth:`check` — verdict on a single proposal.
       * :meth:`prune` — verdict on a batch of proposals (the
         propose-prune-rank-execute step's pruning stage).
+
+    Optionally holds a :class:`~modus.scope.ScopePolicy` and a
+    :class:`~modus.tools.ToolRegistry`. Together they enable
+    registry-driven dispatch for :class:`~modus.actions.Tool`
+    actions: the checker looks up the named tool, validates the
+    action's args against the tool's JSON Schema, and runs the
+    spec's preconditions function. When either is omitted (the
+    default — preserves the test/CLI code paths that don't have
+    one to hand) ``Tool`` actions fall back to the placeholder
+    rejection so the agent can't accidentally execute an unbound
+    tool emission.
+
+    Typed actions (Probe, Request, ...) keep flowing through the
+    legacy :func:`_preconditions` switch regardless. #10 migrates
+    them to registered builtins so the entire consistency path
+    funnels through the registry — at which point the legacy
+    switch becomes deletable.
     """
 
+    scope: ScopePolicy | None = None
+    registry: ToolRegistry | None = None
+
     def check(self, action: Action, state: CorpusState) -> Verdict:
-        preconds = _preconditions(action, state)
+        preconds = self._preconditions_for(action, state)
 
         # Encode each precondition as a Z3 Bool whose truth is the
         # actual boolean value computed from the state. Track each
@@ -155,6 +177,88 @@ class ConsistencyChecker:
         with rejected proposals — typically logged and discarded.
         """
         return [(action, self.check(action, state)) for action in actions]
+
+    def _preconditions_for(self, action: Action, state: CorpusState) -> list[_Precondition]:
+        """Dispatch preconditions:
+
+        * ``Tool`` action with registry + scope wired → run the
+          registry's per-tool preconditions function. Surfaces
+          ``tool_registered:<name>`` when the tool isn't in the
+          registry; ``tool_args_valid:<name>`` when args fail
+          JSON Schema validation; whatever the tool's
+          preconditions function returns otherwise.
+        * Anything else → legacy :func:`_preconditions` switch.
+        """
+        if isinstance(action, Tool):
+            return self._tool_preconditions(action, state)
+        return _preconditions(action, state)
+
+    def _tool_preconditions(self, action: Tool, state: CorpusState) -> list[_Precondition]:
+        if self.registry is None or self.scope is None:
+            # No registry wired — keep the placeholder rejection
+            # from #6 so the agent loop can't execute a Tool action
+            # against an empty consistency context.
+            return [("tool_dispatch_not_yet_implemented", False)]
+        spec = self.registry.get(action.name)
+        if spec is None:
+            return [(f"tool_registered:{action.name}", False)]
+        # Validate args against the tool's JSON Schema. We don't
+        # pull jsonschema as a dependency just for this — Pydantic
+        # already validates against schemas internally, but the
+        # tool's args_schema is a free-form JSON Schema dict
+        # rather than a Pydantic model. Use a minimal structural
+        # check (top-level type=object, required-field presence)
+        # that's good enough to catch the common operator typos
+        # without buying a full JSON Schema validator.
+        args_ok, args_failure_label = _validate_args_against_schema(
+            action.args, spec.args_schema, spec.name
+        )
+        preconds: list[_Precondition] = [(f"tool_registered:{spec.name}", True)]
+        if not args_ok:
+            preconds.append((args_failure_label, False))
+            # Don't run the spec's preconditions when args are
+            # malformed — they may assume the args shape.
+            return preconds
+        preconds.append((f"tool_args_valid:{spec.name}", True))
+        preconds.extend(spec.preconditions(action.args, self.scope, state))
+        return preconds
+
+
+def _validate_args_against_schema(
+    args: dict[str, Any], schema: dict[str, Any], tool_name: str
+) -> tuple[bool, str]:
+    """Minimal structural check of ``args`` against the spec's schema.
+
+    Catches the common operator typos — missing required fields,
+    extra fields the schema forbids — without pulling a full JSON
+    Schema validator. Anything more sophisticated (type coercion,
+    pattern matching, enum constraint) is left to the per-tool
+    preconditions function and the executor.
+
+    Returns ``(ok, label)`` where ``label`` is the precondition name
+    to surface on failure (e.g.
+    ``tool_args_missing_required:amass.enum:domain``).
+    """
+    required = schema.get("required", [])
+    if isinstance(required, list):
+        for field_name in required:
+            if not isinstance(field_name, str):
+                continue
+            if field_name not in args:
+                return (
+                    False,
+                    f"tool_args_missing_required:{tool_name}:{field_name}",
+                )
+    properties = schema.get("properties")
+    additional = schema.get("additionalProperties", True)
+    if isinstance(properties, dict) and additional is False:
+        for arg_name in args:
+            if arg_name not in properties:
+                return (
+                    False,
+                    f"tool_args_unknown_field:{tool_name}:{arg_name}",
+                )
+    return True, ""
 
 
 def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
@@ -265,14 +369,15 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
         ]
 
     if isinstance(action, Tool):
-        # Placeholder: the registry-driven per-tool preconditions
-        # land in #9. Until then, ``Tool`` actions are gated only
-        # on a single placeholder precondition that's always False
-        # — the action validates via Pydantic but the consistency
-        # layer rejects every Tool emission so the agent loop can't
-        # accidentally execute one before #8/#9 are wired. This
-        # ships with the action grammar (#6) so the discriminated
-        # union is complete; the real dispatch comes next.
+        # Tool actions are dispatched via
+        # ``ConsistencyChecker._tool_preconditions`` when the
+        # checker has a registry+scope wired (#9). Reaching
+        # ``_preconditions`` directly with a Tool action means
+        # neither was wired — fall back to the placeholder
+        # rejection so the agent can't execute an unbound tool
+        # emission. The dispatcher in
+        # :meth:`ConsistencyChecker._preconditions_for` short-
+        # circuits this branch when a registry is present.
         return [("tool_dispatch_not_yet_implemented", False)]
 
     raise TypeError(f"unhandled action type: {type(action).__name__}")
