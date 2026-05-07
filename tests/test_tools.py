@@ -136,8 +136,9 @@ class TestBuiltinSpecs:
 class TestDefaultRegistry:
     def test_default_registry_has_typed_action_and_recon_builtins(self) -> None:
         registry = build_default_registry()
-        # Six typed-action builtins + two recon shell builtins.
-        assert len(registry) == 8
+        # Six typed-action builtins + one corpus builtin
+        # (corpus.promote_finding) + two recon shell builtins.
+        assert len(registry) == 9
         for name in (
             "probe",
             "request",
@@ -145,6 +146,7 @@ class TestDefaultRegistry:
             "differential",
             "annotate",
             "hypothesize",
+            "corpus.promote_finding",
             "amass.enum",
             "nuclei.scan",
         ):
@@ -285,8 +287,8 @@ class TestScopeFileToolsBlock:
         scope_data["tools"][0]["name"] = "operator.amass"  # type: ignore[index]
         scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        # Eight default builtins + two operator-declared = ten.
-        assert len(session.tool_registry) == 10
+        # Nine default builtins + two operator-declared = eleven.
+        assert len(session.tool_registry) == 11
         assert "operator.amass" in session.tool_registry
         assert "files.read" in session.tool_registry
         # The operator-declared ones got the right invocation kind.
@@ -303,9 +305,9 @@ class TestScopeFileToolsBlock:
         scope_path = tmp_path / "scope.json"
         scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        # Eight default builtins (six typed-action + amass.enum +
-        # nuclei.scan).
-        assert len(session.tool_registry) == 8
+        # Nine default builtins (six typed-action + corpus.promote_finding
+        # + amass.enum + nuclei.scan).
+        assert len(session.tool_registry) == 9
 
     def test_scope_file_duplicate_tool_name_rejected(self, tmp_path: Path) -> None:
         # Same name twice in the scope file's tools block —
@@ -439,6 +441,61 @@ class TestReconBuiltinSpecs:
         assert any(not value for _, value in labels), labels
 
 
+class TestCorpusBuiltinSpecs:
+    """Contract tests for the ``corpus.*`` builtin tool registrations.
+
+    Currently a single entry: ``corpus.promote_finding``. The
+    end-to-end test (a real ``promote_finding`` call against a
+    fake QuarryMcpClient) lives in test_corpus.py / test_tools_integration.py.
+    """
+
+    def test_promote_finding_registered_in_default_registry(self) -> None:
+        registry = build_default_registry()
+        spec = registry.get("corpus.promote_finding")
+        assert spec is not None
+        assert spec.kind == "builtin"
+        assert spec.side_effect == "write"
+        assert isinstance(spec.invocation, BuiltinInvocation)
+        assert spec.invocation.callable_dotted_path == "modus.builtins.corpus.promote_finding"
+
+    def test_promote_finding_args_schema_pins_severity_enum(self) -> None:
+        registry = build_default_registry()
+        spec = registry.get("corpus.promote_finding")
+        assert spec is not None
+        properties = spec.args_schema["properties"]
+        # Severity is the canonical 5-value enum.
+        assert set(properties["severity"]["enum"]) == {
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical",
+        }
+        # candidate_id and severity required; title optional.
+        required = set(spec.args_schema["required"])
+        assert required == {"candidate_id", "severity"}
+
+    def test_promote_finding_preconditions_accept_run_pool_candidate(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _promote_finding_preconditions
+
+        scope = ScopePolicy(target_name="demo", allowed_assets=frozenset())
+        state = CorpusState(known_evidence=frozenset({"cand-7"}))
+        labels = _promote_finding_preconditions({"candidate_id": "cand-7"}, scope, state)
+        assert all(value for _, value in labels), labels
+
+    def test_promote_finding_preconditions_reject_outside_run_pool(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _promote_finding_preconditions
+
+        scope = ScopePolicy(target_name="demo", allowed_assets=frozenset())
+        # ``cand-7`` was not produced by this run, so promotion of
+        # it is structurally rejected.
+        state = CorpusState(known_evidence=frozenset({"cand-other"}))
+        labels = _promote_finding_preconditions({"candidate_id": "cand-7"}, scope, state)
+        assert any(not value for _, value in labels), labels
+
+
 class TestServerSessionDefault:
     def test_default_session_has_default_registry(self) -> None:
         # ServerSession() without going through from_scope_file
@@ -450,8 +507,9 @@ class TestServerSessionDefault:
             allowed_assets=frozenset({"target.example.com"}),
         )
         session = ServerSession(scope=scope, llm=None)
-        # Eight default builtins (six typed-action + amass.enum +
-        # nuclei.scan).
-        assert len(session.tool_registry) == 8
+        # Nine default builtins (six typed-action + corpus.promote_finding
+        # + amass.enum + nuclei.scan).
+        assert len(session.tool_registry) == 9
         assert "request" in session.tool_registry
+        assert "corpus.promote_finding" in session.tool_registry
         assert "amass.enum" in session.tool_registry

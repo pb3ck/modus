@@ -8,11 +8,15 @@ results.
 The contract this client depends on is documented in
 ``docs/corpus-interface.md``: the seven read tools (``status``,
 ``list_targets``, ``search``, ``list_assets``, ``diff``, ``coverage``,
-``recall``) plus the three analytical tools
-(``analyze_regression``, ``analyze_jsdelta``, ``analyze_interesting``).
-We deliberately do not wrap CLI operations (``quarry init``,
-``quarry target add``, ``quarry finding promote``) because those are
-operator actions and Modus is not the operator.
+``recall``), the three analytical tools (``analyze_regression``,
+``analyze_jsdelta``, ``analyze_interesting``), and the
+Candidate→Finding promotion tool (``finding_promote``). Operator-only
+CLI verbs (``quarry init``, ``quarry target add``) are not wrapped —
+those configure the corpus, which is the operator's job, not the
+agent's. ``finding_promote`` is the exception because closing the
+Candidate→Finding lifecycle is part of what an autonomous offensive
+agent does; submission *to bug-bounty platforms* remains a hard
+non-goal (see ``docs/submission-line.md``).
 
 Result types are pinned where Quarry's schema is stable
 (``CorpusStatus``, ``TargetSummary``, ``SearchHit``, ``Candidate``)
@@ -165,12 +169,14 @@ class SearchHit:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One row from ``analyze_*``.
+    """One row from ``analyze_*`` or ``hypothesize``.
 
-    The Candidate row a successful agent action terminates in; per
-    the submission-line invariant, Modus writes Candidates and stops.
-    Promotion to Finding is Quarry's ``quarry finding promote``,
-    run by the operator outside Modus.
+    The Candidate row a successful agent action terminates in.
+    Modus's autonomous loop promotes severity-medium-or-higher
+    Candidates to Findings via :meth:`CorpusClient.promote_finding`;
+    severity-low and severity-info Candidates stay un-promoted for
+    operator review. Submission to bug-bounty platforms remains a
+    hard non-goal — Modus writes Findings, not bug reports.
     """
 
     id: str
@@ -181,6 +187,26 @@ class Candidate:
     rationale: str
     evidence_refs: tuple[str, ...]
     was_new: bool
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One Finding row, the result of promoting a Candidate.
+
+    Returned by :meth:`CorpusClient.promote_finding`. ``status`` is
+    always ``"hypothesis"`` on first promotion — the operator
+    confirms or escalates via ``quarry finding update`` after
+    reproduction. The Finding's ``evidence_refs`` are inherited
+    verbatim from the source Candidate.
+    """
+
+    id: str
+    candidate_id: str
+    target_id: str
+    severity: str
+    title: str
+    status: str
+    created_at: str
 
 
 # --------------------------------------------------------------------- client
@@ -236,6 +262,14 @@ class CorpusClient(Protocol):
     async def analyze_jsdelta(self, *, target: str | None = None) -> list[Candidate]: ...
 
     async def analyze_interesting(self, *, target: str | None = None) -> list[Candidate]: ...
+
+    async def promote_finding(
+        self,
+        *,
+        candidate_id: str,
+        severity: str,
+        title: str | None = None,
+    ) -> Finding: ...
 
 
 class _SessionProtocol(Protocol):
@@ -297,6 +331,12 @@ class QuarryMcpClient:
             "analyze_regression",
             "analyze_jsdelta",
             "analyze_interesting",
+            # ``finding_promote`` shipped in Quarry post-0.1.0a; older
+            # corpus servers don't expose it. We connect anyway and
+            # surface the absence at promote-call time so an operator
+            # running an old Quarry sees a clear "upgrade Quarry to
+            # promote Findings" message rather than a session refuse.
+            "finding_promote",
         }
     )
 
@@ -595,6 +635,49 @@ class QuarryMcpClient:
     async def analyze_interesting(self, *, target: str | None = None) -> list[Candidate]:
         return await self._analyze("analyze_interesting", target=target)
 
+    # --- Candidate→Finding promotion (writes a Finding) ---------------
+
+    async def promote_finding(
+        self,
+        *,
+        candidate_id: str,
+        severity: str,
+        title: str | None = None,
+    ) -> Finding:
+        """Promote a Candidate to a Finding.
+
+        Args mirror Quarry's MCP ``finding_promote`` tool:
+        ``candidate_id`` accepts a full UUID (with or without
+        dashes) or a 4+ char hex prefix; ``severity`` is one of
+        ``info`` / ``low`` / ``medium`` / ``high`` / ``critical``;
+        ``title`` is an optional override (Quarry derives one from
+        the Candidate's rationale when omitted).
+
+        Returns the new Finding row. Status is always
+        ``"hypothesis"`` on first promotion. Re-promoting the same
+        Candidate raises :class:`CorpusToolError` from Quarry's
+        side ("candidate already promoted").
+        """
+        args: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "severity": severity,
+        }
+        if title is not None:
+            args["title"] = title
+        payload = await self._call("finding_promote", args)
+        try:
+            return Finding(
+                id=str(payload["finding_id"]),
+                candidate_id=str(payload["candidate_id"]),
+                target_id=str(payload["target_id"]),
+                severity=str(payload["severity"]),
+                title=str(payload["title"]),
+                status=str(payload["status"]),
+                created_at=str(payload["created_at"]),
+            )
+        except KeyError as exc:
+            raise CorpusSchemaError(f"finding_promote payload missing field: {exc}") from exc
+
     async def _analyze(self, tool: str, *, target: str | None) -> list[Candidate]:
         args: dict[str, Any] = {}
         if target is not None:
@@ -768,6 +851,26 @@ class StubCorpusClient:
     async def analyze_interesting(self, *, target: str | None = None) -> list[Candidate]:
         return []
 
+    async def promote_finding(
+        self,
+        *,
+        candidate_id: str,
+        severity: str,
+        title: str | None = None,
+    ) -> Finding:
+        # Deterministic stand-in: derive the Finding id from the
+        # Candidate id so tests can assert on a stable shape without
+        # mocking out a real ``find_findings_by_id`` lookup.
+        return Finding(
+            id=f"finding-of-{candidate_id}",
+            candidate_id=candidate_id,
+            target_id="stub-target",
+            severity=severity,
+            title=title or f"stub finding for {candidate_id}",
+            status="hypothesis",
+            created_at="1970-01-01T00:00:00Z",
+        )
+
 
 __all__ = [
     "Candidate",
@@ -779,6 +882,7 @@ __all__ = [
     "CorpusToolError",
     "CorpusToolsMissingError",
     "CorpusUnavailableError",
+    "Finding",
     "QuarryMcpClient",
     "SearchHit",
     "StubCorpusClient",
