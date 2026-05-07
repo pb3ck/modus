@@ -52,11 +52,14 @@ def quarry_corpus(tmp_path: Path) -> str:
 
 
 class TestRealQuarry:
-    async def test_status_reports_empty_corpus(self, quarry_corpus: str) -> None:
+    async def test_status_via_inherited_quarry_home(
+        self, quarry_corpus: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """env=None at the client means inherit os.environ — exercise it."""
         binary = _quarry_binary()
-        assert binary is not None  # the fixture would have skipped otherwise
-        env = {**os.environ, "QUARRY_HOME": quarry_corpus}
-        client = QuarryMcpClient(command=binary, env=env, call_timeout_seconds=15.0)
+        assert binary is not None
+        monkeypatch.setenv("QUARRY_HOME", quarry_corpus)
+        client = QuarryMcpClient(command=binary, call_timeout_seconds=15.0)
         async with client:
             status = await client.status()
             targets = await client.list_targets()
@@ -64,7 +67,8 @@ class TestRealQuarry:
         assert status.current_target is None
         assert targets == []
 
-    async def test_round_trip_target_creation(self, quarry_corpus: str, tmp_path: Path) -> None:
+    async def test_round_trip_target_creation(self, quarry_corpus: str) -> None:
+        """Explicit env still works — round-trip a target creation."""
         binary = _quarry_binary()
         assert binary is not None
         env = {**os.environ, "QUARRY_HOME": quarry_corpus}
@@ -85,3 +89,15 @@ class TestRealQuarry:
             targets = await client.list_targets()
         assert status.targets == 1
         assert any(t.name == "demo" and t.is_current for t in targets)
+
+    async def test_unavailable_when_corpus_uninitialised(self, tmp_path: Path) -> None:
+        """An uninitialised corpus dir → CorpusUnavailableError, not a traceback."""
+        from modus.corpus import CorpusUnavailableError
+
+        binary = _quarry_binary()
+        assert binary is not None
+        env = {**os.environ, "QUARRY_HOME": str(tmp_path / "never-initialised")}
+        client = QuarryMcpClient(command=binary, env=env, call_timeout_seconds=10.0)
+        with pytest.raises(CorpusUnavailableError):
+            async with client:
+                await client.status()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -295,6 +296,11 @@ class QuarryMcpClient:
         env: dict[str, str] | None = None,
         call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS,
     ) -> None:
+        """Construct a client. ``env=None`` means inherit ``os.environ`` —
+        the common case, since Quarry needs ``QUARRY_HOME`` (or ``HOME``,
+        if it's falling back to the default ``~/.quarry`` path) to find
+        the corpus. Pass an explicit dict to run with a restricted env.
+        """
         self._command = command
         self._args = args
         self._env = env
@@ -334,23 +340,37 @@ class QuarryMcpClient:
             params = StdioServerParameters(
                 command=self._command,
                 args=list(self._args),
-                env=self._env,
+                env=_resolve_env(self._env),
             )
             try:
                 read, write = await stack.enter_async_context(stdio_client(params))
             except FileNotFoundError as exc:
-                await stack.aclose()
                 raise CorpusUnavailableError(
                     f"Quarry binary {self._command!r} was not found. "
                     f"Install Quarry or pass --quarry <path>."
                 ) from exc
             except OSError as exc:
-                await stack.aclose()
                 raise CorpusUnavailableError(
                     f"Failed to start Quarry MCP server ({self._command!r}): {exc}"
                 ) from exc
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
+            try:
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+            except CorpusError:
+                raise
+            except Exception as exc:
+                # Most likely cause: the Quarry subprocess wrote an error to
+                # stderr and exited before the MCP handshake completed, e.g.
+                # `quarry init` was never run for this corpus directory. The
+                # SDK surfaces that as a generic McpError; map it to the
+                # corpus-unavailable category so the operator gets a useful
+                # message and a meaningful exit code.
+                raise CorpusUnavailableError(
+                    f"Quarry MCP server {self._command!r} did not complete the "
+                    f"initialize handshake: {exc}. Check that the corpus "
+                    f"directory is initialised (`quarry init`) and that "
+                    f"$QUARRY_HOME points at it."
+                ) from exc
             self._session = session
             self._stack = stack
             await self._verify_tools()
@@ -604,6 +624,27 @@ def _decode_payload(tool: str, result: CallToolResult) -> dict[str, Any]:
             f"{tool} returned JSON of type {type(decoded).__name__}, expected object"
         )
     return decoded
+
+
+def _resolve_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Resolve the env dict the subprocess will see.
+
+    The semantic distinction:
+
+    * ``env=None`` (the default) means *inherit* the parent's environment.
+      This is what most callers want — Quarry typically needs ``HOME``,
+      ``QUARRY_HOME``, and ``PATH`` to find the corpus and resolve
+      transitive binaries. Pinned with explicit ``os.environ.copy()`` so
+      the subprocess starts with the parent's view, not the MCP SDK's
+      minimal ``get_default_environment()`` set.
+    * ``env={}`` (explicit empty dict) means run with no inherited env.
+      Sometimes useful to pin reproducibility in tests.
+    * ``env={'KEY': 'value', ...}`` (explicit dict with entries) is the
+      *exact* env the subprocess sees — no inheritance.
+    """
+    if env is None:
+        return os.environ.copy()
+    return dict(env)
 
 
 # --------------------------------------------------------------------- stub

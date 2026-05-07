@@ -154,6 +154,29 @@ class TestLifecycle:
             await client.status()
         assert session.initialized is False  # we did not own the session
 
+    async def test_resolve_env_inherits_when_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.corpus import _resolve_env
+
+        monkeypatch.setenv("QUARRY_HOME", "/some/path")
+        env = _resolve_env(None)
+        assert env["QUARRY_HOME"] == "/some/path"
+
+    async def test_resolve_env_empty_dict_is_explicit_no_inheritance(self) -> None:
+        from modus.corpus import _resolve_env
+
+        env = _resolve_env({})
+        assert env == {}
+
+    async def test_resolve_env_returns_copy_not_view(self) -> None:
+        from modus.corpus import _resolve_env
+
+        original = {"A": "1"}
+        env = _resolve_env(original)
+        env["A"] = "mutated"
+        assert original["A"] == "1"
+
     async def test_aenter_verifies_required_tools(self) -> None:
         # Drop one required tool to provoke the schema check
         partial = [tool for tool in _all_required_tools() if tool.name != "analyze_regression"]
