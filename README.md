@@ -16,12 +16,15 @@ Candidates into the corpus. Modus is delivered as an **MCP server**:
 the operator drives it from any MCP-aware host (Claude Desktop,
 Claude Code, Cursor, anything that speaks the Model Context Protocol).
 The agent's autonomous loop runs end-to-end inside Modus — the host
-just kicks it off and reads the result. The single hard human gate
-is on the way out: **Modus never submits.** No `submit`, `publish`,
-or `post` action exists in the grammar; promotion of a Candidate to
-a Finding is the operator's `quarry finding promote`, run outside
-Modus. Modus may *recommend* submission in a Candidate's rationale —
-the decision and the act remain the operator's.
+just kicks it off and reads the result. The autonomous loop closes
+the Candidate→Finding lifecycle inside the corpus: severity-medium-
+or-higher Candidates auto-promote to Findings via `corpus.promote_finding`,
+backed by Quarry's MCP `finding_promote` write tool. The single hard
+human gate is on bug-bounty submission: **Modus never submits to a
+bounty programme.** No `submit`, `publish`, `post`, `report-to-h1`,
+or equivalent tool exists in the registry, and adding one is
+off-limits. Submission of a Finding to a programme is the operator's,
+performed outside Modus.
 
 > **Status: alpha (0.3.0a1).** The autonomous loop runs end-to-end
 > against authorized targets — see [`docs/quickstart.md`](./docs/quickstart.md).
@@ -58,15 +61,18 @@ the decision and the act remain the operator's.
   subordinate to its data model. Other tools' observations live
   alongside Quarry rows in the same in-session pool.
 - **A submission firewall enforced by registry membership.** No
-  `submit`, `report`, `publish`, or `post` tool is registered in
-  the default registry, and adding one is project-policy
-  off-limits. The agent can emit a `Tool` action with any name,
-  but the consistency layer rejects with
-  `tool_registered:<name>` if it isn't in the registry. Promotion
-  to a Finding is the operator's `quarry finding promote`, run
-  outside Modus. Rationales may *recommend* promotion or
-  submission; the structural firewall is the registry's contents,
-  not a ban on operator-facing recommendations.
+  `submit`, `report`, `publish`, `post`, or `report-to-h1` tool
+  is registered in the default registry, and adding one is
+  project-policy off-limits. The agent can emit a `Tool` action
+  with any name, but the consistency layer rejects with
+  `tool_registered:<name>` if it isn't in the registry. The
+  firewall covers *external submission* (to bug-bounty
+  platforms), not internal promotion: the
+  `corpus.promote_finding` builtin closes the Candidate→Finding
+  lifecycle inside the local corpus on severity-medium-or-higher
+  Candidates, which is corpus-internal, not an outbound action.
+  Submission of a Finding to a programme is the operator's,
+  performed outside Modus.
 
 ## What this isn't
 
@@ -136,12 +142,16 @@ Modus takes a different bet, in five parts.
   provider-portable choice the operator makes via env vars.
   Modus is not locked to any provider on either side.
 - The submission line is **structural**. No `submit`, `publish`,
-  `post`, or `report` tool is registered in the default registry,
-  and adding one is project-policy off-limits. The agent can
-  emit a `Tool` action with any name, but the consistency layer
-  rejects with `tool_registered:<name>` if it isn't in the
-  registry. Promotion to a Finding is the operator's
-  `quarry finding promote`, run outside Modus.
+  `post`, `report`, or `report-to-h1` tool is registered in the
+  default registry, and adding one is project-policy off-limits.
+  The agent can emit a `Tool` action with any name, but the
+  consistency layer rejects with `tool_registered:<name>` if it
+  isn't in the registry. The firewall covers *external
+  submission* (to bug-bounty platforms), not internal promotion:
+  Candidate→Finding promotion is corpus-internal and the
+  autonomous loop closes it via `corpus.promote_finding` on
+  severity-medium-or-higher Candidates. Submission to a
+  programme is the operator's, performed outside Modus.
 
 These five commitments are the invariants. The specific MCP
 host, the specific LLM provider, the specific Z3 encoding, the
@@ -197,8 +207,14 @@ invariants don't.
                                       Candidates
                                           │
                                           ▼
-                       (operator runs `quarry finding promote`
-                        to lift to Finding — outside Modus)
+                                  corpus.promote_finding
+                                  (severity ≥ medium, in-loop)
+                                          │
+                                          ▼
+                                       Findings
+                                          │
+                                          ▼
+                       (operator submits to programme — outside Modus)
 ```
 
 Every action — typed-action fast path or generic `tool` dispatch —
@@ -274,13 +290,16 @@ exact tool surface Modus consumes.
 - Competing with commercial autonomous pentesters on benchmark
   scores. Modus is a different bet on the agent's *shape*, not
   on raw recall.
-- Submitting reports automatically. Ever. At any milestone.
-  Under any flag. There is no outbound action in the grammar;
-  promotion is the operator's `quarry finding promote`. Modus's
-  rationale may *recommend* the operator submit a Candidate, but
-  the act is theirs.
+- Submitting Findings to bug-bounty programmes automatically.
+  Ever. At any milestone. Under any flag. No `submit`, `publish`,
+  `post`, `report`, or `report-to-h1` tool exists in the
+  registry, and none will be added. The submission line is
+  *external* — Modus closes the Candidate→Finding lifecycle
+  inside the local corpus on severity-medium-or-higher
+  Candidates, but submission of a Finding to a programme is the
+  operator's, performed outside Modus.
 - Generating finished, submission-ready report text without
-  operator review. Candidates are structured rationales the
+  operator review. Findings carry the structured rationale the
   operator triages; turning a triaged set into a programme-ready
   submission package is the operator's job.
 - Running outside operator-defined scope. Scope is encoded as

@@ -10,6 +10,54 @@ notice.
 
 ## [Unreleased]
 
+### Added
+
+- **Autonomous Candidate→Finding promotion.** New
+  `corpus.promote_finding` builtin in the default tool registry,
+  dispatching to `modus.builtins.corpus.promote_finding`, which
+  calls Quarry's MCP `finding_promote` write tool (Quarry ≥ 0.2 —
+  older Quarry servers connect but surface
+  `CorpusToolsMissingError` at promote-call time with a clear
+  upgrade message). Per-tool precondition gates the Candidate id
+  on this run's observation pool (`state.known_evidence`) so
+  cross-run promotion is structurally impossible — that remains
+  the operator's `quarry finding promote` CLI verb.
+- **Severity-gated proposer rule.** The system prompt instructs
+  the LLM to emit `corpus.promote_finding` on the step after a
+  `hypothesize` whose `severity_hint` was `medium`, `high`, or
+  `critical`. Severity-`low` and severity-`info` Candidates stay
+  un-promoted for operator review. Promoting a low/info Candidate
+  is a policy violation surfaced in the closing-rule block.
+- **`Finding` dataclass** in `modus.corpus` mirroring Quarry's
+  `finding_promote` response (`id`, `candidate_id`, `target_id`,
+  `severity`, `title`, `status`, `created_at`).
+- **`QuarryMcpClient.promote_finding(...)`** — async method
+  wrapping the MCP call. Added to the `CorpusClient` Protocol;
+  `StubCorpusClient` returns a deterministic `Finding` for tests.
+- **`modus.builtins` package** — new module hierarchy hosting
+  the first-party builtin callables. Currently ships
+  `modus.builtins.corpus.promote_finding`; the six typed-action
+  callables (`probe`, `request`, etc.) remain stub paths
+  pending the registry-dispatch migration.
+
+### Changed
+
+- **Default registry size: 8 → 9.** The `corpus.promote_finding`
+  builtin joins the six typed-action builtins and the two recon
+  shells (`amass.enum`, `nuclei.scan`).
+- **Submission policy** (ADR-0002 §4, ADR-0003 §6, ADR-0004
+  "Submission line"): the structural firewall on *external
+  submission* (no `submit`/`publish`/`post`/`report`/
+  `report-to-h1` tool in the registry, adding one is off-limits)
+  is unchanged. The earlier "promotion is operator-only via the
+  Quarry CLI" stance is dropped — promotion is now a corpus-
+  internal action the autonomous loop performs. Submission to
+  bug-bounty programmes remains the operator's, performed
+  outside Modus.
+- **README, ROADMAP, ADRs 0002/0003/0004, `docs/quickstart.md`,
+  proposer system prompt** all amended to reflect the new
+  promotion policy. ROADMAP gains a Milestone 7 entry.
+
 ## [0.3.0a1] — 2026-05-07
 
 Tools-first alpha. The closed v0.1 typed-action vocabulary is

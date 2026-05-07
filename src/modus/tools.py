@@ -465,6 +465,91 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
     )
 
 
+def _promote_finding_preconditions(
+    args: dict[str, Any], scope: ScopePolicy, state: CorpusState
+) -> list[tuple[str, bool]]:
+    """Gate ``corpus.promote_finding`` on the candidate id being
+    referenced by something in this run's observation pool.
+
+    Cross-run bleed is structurally undesirable: an autonomous run
+    should only promote Candidates that *this* run observed enough
+    to vouch for. The check is "candidate_id matches one of the
+    Candidates this run authored via :class:`Hypothesize` or that
+    came back from a same-run :class:`Tool` invocation of an
+    ``analyze_*`` tool". We approximate that with
+    ``state.known_evidence`` membership — Hypothesize calls always
+    add the new Candidate's id to ``known_evidence`` (per #4), and
+    a same-run analyze_*-produced Candidate id flows through the
+    same pool when its observation lands.
+
+    If the registered Candidate id wasn't seen this run, the
+    promotion is structurally rejected. Operators who explicitly
+    want cross-run promotion run ``quarry finding promote`` from
+    the CLI, which Modus does not gate.
+    """
+    candidate_id = str(args.get("candidate_id", ""))
+    return [
+        (
+            f"promote_candidate_in_run_pool:{candidate_id}",
+            candidate_id in state.known_evidence,
+        ),
+    ]
+
+
+def builtin_corpus_tool_specs() -> tuple[ToolSpec, ...]:
+    """First-party tool entries that mutate corpus state via Quarry.
+
+    Currently a single entry: ``corpus.promote_finding``, the
+    Candidate→Finding promotion verb. Wired through to Quarry's
+    MCP ``finding_promote`` write tool via
+    :func:`modus.builtins.corpus.promote_finding`.
+
+    Promotion's structural firewall around external bug-bounty
+    submission is *registry membership*, not a per-tool
+    precondition: no submission-shaped tool ships in the default
+    registry, and adding one is off-limits for scope files. What
+    this builtin does is internal: closes the Candidate→Finding
+    lifecycle within Quarry. Submission to bounty platforms remains
+    a hard non-goal.
+    """
+    return (
+        ToolSpec(
+            name="corpus.promote_finding",
+            kind="builtin",
+            description=(
+                "Promote a Candidate to a Finding in the Quarry "
+                "corpus. Args: {candidate_id: str, severity: str, "
+                "title?: str}. severity is one of info/low/medium/"
+                "high/critical. The autonomous loop's policy "
+                "promotes severity medium-or-higher Candidates "
+                "automatically; severity-low and severity-info "
+                "Candidates stay un-promoted for operator review. "
+                "Returns the new Finding row. Status is always "
+                "'hypothesis' on first promotion. NOT a submission "
+                "verb — Modus never submits to bounty platforms."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["info", "low", "medium", "high", "critical"],
+                    },
+                    "title": {"type": "string"},
+                },
+                "required": ["candidate_id", "severity"],
+                "additionalProperties": False,
+            },
+            side_effect="write",
+            invocation=BuiltinInvocation(
+                callable_dotted_path="modus.builtins.corpus.promote_finding",
+            ),
+            preconditions=_promote_finding_preconditions,
+        ),
+    )
+
+
 def builtin_recon_tool_specs() -> tuple[ToolSpec, ...]:
     """First-party shell-tool registrations for recon binaries.
 
@@ -558,6 +643,8 @@ from_scope_file`). The default registry is what every
     registry = ToolRegistry()
     for spec in builtin_typed_action_specs():
         registry.register(spec)
+    for spec in builtin_corpus_tool_specs():
+        registry.register(spec)
     for spec in builtin_recon_tool_specs():
         registry.register(spec)
     return registry
@@ -572,6 +659,7 @@ __all__ = [
     "ToolRegistry",
     "ToolSpec",
     "build_default_registry",
+    "builtin_corpus_tool_specs",
     "builtin_recon_tool_specs",
     "builtin_typed_action_specs",
 ]

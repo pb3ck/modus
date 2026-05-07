@@ -149,30 +149,34 @@ via `--scope` or `MODUS_SCOPE_PATH`). Parsed once at startup,
 held immutably for the server's lifetime, consulted by the
 consistency layer on every tool call (surface A and surface B).
 
-### 6. The submission line stays structural
+### 6. Submission stays structural; promotion is now internal
 
-Modus has no `submit`, `report`, `publish`, or `post` tool on
-either surface, and none will be added. The terminal effect of
-every action — verified or autonomous — is a Candidate row (or
-an annotation, observation, or comparison) in Quarry. Promotion
-is the operator's `quarry finding promote`, run outside Modus
-after the session ends. The autonomous-session tools cannot
-escape this; they're implemented on top of the same action
-vocabulary that has no submission verb in it.
+Modus has no `submit`, `report`, `publish`, `post`, or
+`report-to-h1` tool on either surface, and none will be added.
+That ban applies to the codebase (no first-party submit-shaped
+tool) and to operator scope files (declaring one is a policy
+violation, not a config option). Submission of Findings to bug-
+bounty programmes remains the operator's, performed outside Modus.
 
-What the firewall does *not* do — clarified 2026-05-07: a
-Candidate's `rationale` may legitimately recommend the operator
-promote or submit. That is an operator-facing recommendation in
-storage, not an outbound submission. The structural absence of
-a submit-shaped action is the gate; the rationale's content is
-the operator's input, not the firewall's surface.
+**Amended 2026-05-07 (v0.4.0):** Candidate→Finding promotion is
+NOT a submission — it's a corpus-internal lifecycle close.
+Modus's autonomous loop performs it via the `corpus.promote_finding`
+builtin (registered in the default registry, dispatching to
+`modus.builtins.corpus.promote_finding`, calling Quarry's MCP
+`finding_promote` write tool). The proposer's closing rule
+auto-promotes severity-medium-or-higher Candidates on the step
+after the originating `hypothesize`; severity-low and severity-
+info Candidates stay un-promoted for operator review. The earlier
+"promotion is operator-only via the Quarry CLI" stance was
+dropped 2026-05-07.
 
-**Amended 2026-05-07 (ADR-0004):** the structural firewall now
-lives in the `ToolRegistry`. No `submit`/`publish`/`post`/`report`
-*tool* is registered in the default registry; adding one is
-project-policy off-limits. Both autonomous-session and verified-
-action surfaces dispatch through the same registry, so neither
-can reach a submission tool the registry doesn't expose.
+**Amended 2026-05-07 (ADR-0004):** the structural firewall on
+*external submission* lives in the `ToolRegistry`. No
+`submit`/`publish`/`post`/`report` *tool* is registered in the
+default registry; adding one is project-policy off-limits. Both
+autonomous-session and verified-action surfaces dispatch through
+the same registry, so neither can reach a submission tool the
+registry doesn't expose.
 
 Quarry's MCP passthroughs (the section above's "second class")
 are now first-party registry entries (`corpus.search`,

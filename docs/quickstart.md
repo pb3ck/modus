@@ -142,30 +142,36 @@ mostly LLM round-trip latency. The host's UX during the call is
 "tool in progress"; you can keep reading the conversation while
 it runs.
 
-## 5. Read the result and promote findings
+## 5. Read the result and review the Findings
 
-The MCP tool result is a JSON payload with two top-level fields:
+The MCP tool result is a JSON payload with three top-level fields:
 
 - `session` — the full audit record (every step, every proposal,
   every verdict, every executed action).
 - `candidates` — the Candidates the agent authored via
   `hypothesize` actions.
+- `findings` — the Findings the agent auto-promoted from those
+  Candidates. The autonomous loop calls `corpus.promote_finding`
+  on the step after a `hypothesize` whose `severity_hint` was
+  `medium`, `high`, or `critical`. Severity-`low` and severity-
+  `info` Candidates stay un-promoted in the corpus for your
+  review.
 
-Modus does not promote Candidates to Findings itself — that is
-the operator's `quarry finding promote`, run outside Modus.
-Modus's rationales may recommend promotion or submission; the
-decision and the act remain yours. If a Candidate looks
-defensible, you promote it via Quarry's own CLI:
+Each promoted Finding lands in Quarry with status `hypothesis`.
+The Finding lifecycle (`hypothesis` → `confirmed` → `reported` →
+`accepted`/`rejected`/`duplicate`) is Quarry's; you drive it from
+the CLI as you reproduce, escalate, and submit:
 
 ```sh
-quarry finding list                       # see the corpus's candidates
-quarry finding promote <candidate-id>     # promote a candidate to a Finding
-quarry finding show <finding-id>          # render the finding for review
+quarry finding list                       # see all Findings (auto-promoted + manual)
+quarry finding show <finding-id>          # render a Finding for review
+quarry finding update <id> --status confirmed   # after you reproduce it
+quarry finding promote <candidate-id>     # manual promotion (low/info, or older runs)
 ```
 
-The Finding lifecycle (hypothesis → confirmed → reported →
-accepted/rejected/duplicate) is Quarry's, run by you, outside
-Modus. See [Quarry's findings doc](https://github.com/pb3ck/quarry/blob/main/docs/findings.md).
+Submission to a bug-bounty programme is yours — Modus has no
+`submit`/`publish`/`post`/`report-to-h1` tool in its registry,
+and none will be added. See [Quarry's findings doc](https://github.com/pb3ck/quarry/blob/main/docs/findings.md).
 
 ## What to do if it doesn't work
 

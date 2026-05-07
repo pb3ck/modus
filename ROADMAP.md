@@ -8,10 +8,14 @@ The throughline: Modus is an autonomous offensive agent
 delivered as an MCP server. The agent's autonomous loop runs
 end-to-end inside Modus when invoked via its autonomous-session
 MCP tool. The operator drives Modus from any MCP-aware host
-(Claude Desktop primarily). The single hard human gate is on
-the way out — Modus writes Candidates and stops, and the
-operator promotes them to Findings via Quarry. Every milestone
-is read against that target shape.
+(Claude Desktop primarily). The autonomous loop closes the
+Candidate→Finding lifecycle inside the corpus: severity-medium-
+or-higher Candidates auto-promote to Findings via
+`corpus.promote_finding`. The single hard human gate is on bug-
+bounty submission — Modus has no submit-shaped tool, none will
+be added, and submission of a Finding to a programme is the
+operator's, performed outside Modus. Every milestone is read
+against that target shape.
 
 ## Milestone 0 — Skeleton (done)
 
@@ -188,6 +192,47 @@ What `0.3.0a1` ships:
   (no `submit`-shaped *tool* in the registry, adding one is
   off-limits, terminal state is a Candidate in storage); the
   verbal ban on rationales recommending submission is dropped.
+
+## Milestone 7 — Autonomous Candidate→Finding promotion (in progress)
+
+The autonomous loop closes the Candidate→Finding lifecycle
+inside its own run instead of handing off to a CLI invocation.
+ADR-0002 §4 amended; ADR-0003 §6 amended; ADR-0004's
+"Submission line" amended.
+
+What this milestone delivers:
+
+- **`corpus.promote_finding` builtin** — registered in the
+  default `ToolRegistry` (alongside the typed-action builtins
+  and the recon shells), dispatching to
+  `modus.builtins.corpus.promote_finding`, which calls Quarry's
+  MCP `finding_promote` write tool via
+  `QuarryMcpClient.promote_finding`. Per-tool precondition gates
+  the Candidate id on this run's observation pool — cross-run
+  promotion remains the operator's `quarry finding promote` CLI
+  verb.
+- **Severity-gated proposer rule** — system prompt instructs
+  the model to emit `corpus.promote_finding` on the step after
+  any `hypothesize` whose `severity_hint` was `medium`, `high`,
+  or `critical`. Severity-`low` and severity-`info` Candidates
+  stay un-promoted for operator review. Promoting a low/info
+  Candidate is a policy violation.
+- **Quarry-side write tool** — `finding_promote` exposed on
+  Quarry's MCP surface as a peer to the existing read tools and
+  the `analyze_*` write tools. Returns the new Finding's
+  fields verbatim. Status is always `hypothesis` on first
+  promotion.
+- **Submission firewall: unchanged.** No `submit`/`publish`/
+  `post`/`report`/`report-to-h1` tool exists in the registry,
+  none will be added, declaring one in a scope file's `tools`
+  block is a policy violation. Submission to bug-bounty
+  programmes remains the operator's, performed outside Modus.
+
+The non-pre-release `0.4.0` tag wants a Juice Shop run that
+end-to-end produces Findings (not just Candidates) autonomously
+through the MCP host, with severity gating verified live (a
+severity-`info` Candidate stays a Candidate; a severity-`high`
+Candidate becomes a Finding without operator intervention).
 
 Verified live: gemma2:9b on M1 Pro / 16 GB unified producing
 seven distinct Juice Shop Candidates autonomously through the

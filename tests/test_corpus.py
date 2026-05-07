@@ -30,6 +30,7 @@ from modus.corpus import (
     CorpusTimeoutError,
     CorpusToolError,
     CorpusToolsMissingError,
+    Finding,
     QuarryMcpClient,
     StubCorpusClient,
 )
@@ -375,6 +376,98 @@ class TestAnalyze:
             await client.analyze_regression()
 
 
+class TestPromoteFinding:
+    @staticmethod
+    def _payload(
+        *,
+        finding_id: str = "find-1",
+        candidate_id: str = "cand-1",
+        target_id: str = "tgt-1",
+        severity: str = "high",
+        title: str = "200 → 401 status flip",
+        status: str = "hypothesis",
+        created_at: str = "2026-05-07T22:30:00Z",
+    ) -> dict[str, Any]:
+        return {
+            "finding_id": finding_id,
+            "candidate_id": candidate_id,
+            "target_id": target_id,
+            "severity": severity,
+            "title": title,
+            "status": status,
+            "created_at": created_at,
+        }
+
+    async def test_returns_finding_dataclass(self) -> None:
+        session = _FakeSession(responses={"finding_promote": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        result = await client.promote_finding(candidate_id="cand-1", severity="high")
+        assert isinstance(result, Finding)
+        assert result.id == "find-1"
+        assert result.candidate_id == "cand-1"
+        assert result.target_id == "tgt-1"
+        assert result.severity == "high"
+        assert result.status == "hypothesis"
+        assert result.title == "200 → 401 status flip"
+        assert result.created_at == "2026-05-07T22:30:00Z"
+
+    async def test_passes_args_through_to_quarry(self) -> None:
+        session = _FakeSession(responses={"finding_promote": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.promote_finding(
+            candidate_id="cand-1",
+            severity="medium",
+            title="explicit title",
+        )
+        assert session.calls == [
+            (
+                "finding_promote",
+                {
+                    "candidate_id": "cand-1",
+                    "severity": "medium",
+                    "title": "explicit title",
+                },
+            ),
+        ]
+
+    async def test_omits_title_when_not_supplied(self) -> None:
+        session = _FakeSession(responses={"finding_promote": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.promote_finding(candidate_id="cand-1", severity="high")
+        # ``title`` must NOT appear in the args — Quarry derives one
+        # from the Candidate's rationale when omitted.
+        assert "title" not in session.calls[0][1]
+
+    async def test_missing_required_field_raises_schema_error(self) -> None:
+        broken = self._payload()
+        del broken["finding_id"]
+        session = _FakeSession(responses={"finding_promote": _text_result(broken)})
+        client = QuarryMcpClient.from_session(session)
+        with pytest.raises(CorpusSchemaError):
+            await client.promote_finding(candidate_id="cand-1", severity="high")
+
+    async def test_quarry_error_surfaces_as_corpus_tool_error(self) -> None:
+        session = _FakeSession(
+            responses={"finding_promote": _error_result("candidate already promoted")}
+        )
+        client = QuarryMcpClient.from_session(session)
+        with pytest.raises(CorpusToolError) as info:
+            await client.promote_finding(candidate_id="cand-1", severity="high")
+        assert "already promoted" in str(info.value)
+
+    async def test_missing_optional_tool_raises_per_call(self) -> None:
+        # Server doesn't expose ``finding_promote`` (older Quarry).
+        # Modus connects fine; promotion call surfaces the absence.
+        partial = [_FakeTool(name=name) for name in QuarryMcpClient.REQUIRED_TOOLS]
+        session = _FakeSession(tools=partial)
+        client = QuarryMcpClient.from_session(session)
+        # _verify_tools wasn't called via from_session, so populate
+        # the available set manually to mimic post-handshake state.
+        client._available_tools = frozenset(t.name for t in partial)
+        with pytest.raises(CorpusToolsMissingError):
+            await client.promote_finding(candidate_id="cand-1", severity="high")
+
+
 class TestPassthroughTools:
     async def test_diff_returns_payload_verbatim(self) -> None:
         payload = {"target": "demo", "added_assets": [], "note": None}
@@ -476,3 +569,20 @@ class TestStubCorpusClient:
         )
         result = await stub.list_targets()
         assert [t.name for t in result] == ["demo"]
+
+    async def test_promote_finding_returns_deterministic_finding(self) -> None:
+        stub = StubCorpusClient()
+        result = await stub.promote_finding(candidate_id="cand-9", severity="high")
+        assert isinstance(result, Finding)
+        assert result.candidate_id == "cand-9"
+        assert result.severity == "high"
+        assert result.status == "hypothesis"
+        assert result.id == "finding-of-cand-9"
+        assert "stub finding for cand-9" in result.title
+
+    async def test_promote_finding_honours_explicit_title(self) -> None:
+        stub = StubCorpusClient()
+        result = await stub.promote_finding(
+            candidate_id="cand-9", severity="medium", title="manual title"
+        )
+        assert result.title == "manual title"
