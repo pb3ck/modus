@@ -233,6 +233,27 @@ class TestAnthropicProposer:
         actions = await proposer.propose(_step_context())
         assert actions == []
 
+    async def test_system_prompt_describes_promotion_policy(self) -> None:
+        """The system prompt must contain the severity-gated auto-promotion
+        policy and the ban on bug-bounty submission tools.
+
+        Regression guard for #13 — the policy is what produces the
+        autonomous Candidate→Finding loop close. Drift here is a
+        product-behaviour drift, not a stylistic one.
+        """
+        client = _FakeAnthropicClient(text='{"actions": []}')
+        proposer = AnthropicProposer(scope=_scope(), client=client, model="claude-test")
+        await proposer.propose(_step_context())
+        kwargs = client.messages.last_kwargs
+        assert kwargs is not None
+        system_text = kwargs["system"][0]["text"]
+        # Auto-promotion policy: medium/high/critical → promote.
+        assert "corpus.promote_finding" in system_text
+        assert "medium" in system_text and "critical" in system_text
+        # The submission firewall stays — no submit tool, none coming.
+        assert "submit" in system_text.lower()
+        assert "bug-bounty" in system_text or "bounty" in system_text
+
     async def test_returns_empty_on_client_error(self) -> None:
         class _Boom:
             class _Messages:

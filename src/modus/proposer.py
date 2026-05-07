@@ -164,8 +164,10 @@ discriminator:
   tokens, meaningful info leaks; ``low`` = minor disclosure (version \
   strings, internal paths); ``info`` = nothing actionable. \
   Defaulting to ``info`` on a clear bypass or exfil is wrong. \
-  Modus never promotes Candidates to Findings — that's the \
-  operator's job.
+  ``severity_hint`` also gates auto-promotion: medium/high/critical \
+  Candidates are auto-promoted to Findings on the next step via \
+  ``tool(name="corpus.promote_finding", args=...)``; low/info \
+  Candidates are not. See the promotion policy in the system prompt.
 """
 
 
@@ -300,14 +302,19 @@ class _LlmProposerBase:
             "under formal scope constraints. You propose actions from a typed "
             "vocabulary; an SMT consistency check rejects proposals that "
             "violate scope or precondition rules.\n\n"
-            "Submission policy: Modus does not perform submissions itself — "
-            "there is no `submit`, `publish`, `post`, or equivalent action in "
-            "the grammar, and none will be added. The terminal action of "
-            "every successful run is one or more `hypothesize` calls, which "
-            "write Candidates. You MAY recommend in your rationale that the "
-            "operator promote a Candidate to a Finding via Quarry's "
-            "`quarry finding promote`, or submit it to a bug-bounty "
-            "programme — the decision and the act remain the operator's.\n\n"
+            "Promotion & submission policy: Modus closes the Candidate→Finding "
+            "lifecycle inside the corpus. After a `hypothesize` lands a "
+            "Candidate whose `severity_hint` is `medium`, `high`, or "
+            "`critical`, your NEXT proposal on the following step MUST be a "
+            "`tool` action invoking `corpus.promote_finding` against that "
+            "Candidate's id (with the same severity). Severity-low and "
+            "severity-info Candidates stay un-promoted for operator review — "
+            "do NOT promote them. Submission to bug-bounty platforms is a "
+            "separate, hard non-goal: there is no `submit`, `publish`, "
+            "`post`, or equivalent tool in the registry, none will be added, "
+            "and you must not propose one. The operator submits Findings to "
+            "bounty programmes themselves; Modus's job ends at the Finding "
+            "row in Quarry.\n\n"
             "# Action grammar\n\n"
             f"{_VOCABULARY_DESCRIPTION}\n"
             "# Scope (immutable for this session)\n\n"
@@ -354,7 +361,7 @@ class _LlmProposerBase:
                 "above (and shift up or down per the severity notes). A "
                 "one-sentence rationale ('200 vs 401, hence auth bypass') "
                 "is insufficient — the operator reads this field to "
-                "decide whether to promote the Candidate. "
+                "decide whether to confirm the Finding. "
                 "The `rationale` field MUST be a non-empty string with all "
                 "four sections inline; emitting `null`, an empty string, or "
                 "omitting the field fails Pydantic validation and the "
@@ -362,6 +369,21 @@ class _LlmProposerBase:
                 "it into the corpus. If you don't have enough context to "
                 "write a substantive rationale, propose another `request` "
                 "or `probe` instead and gather more evidence first.\n\n"
+                "# Auto-promotion rule\n\n"
+                "If a `hypothesize` action from a previous step is reflected "
+                "in `# Current corpus state` (its Candidate id appears in "
+                "the known_observations / Candidate pool) AND its "
+                "`severity_hint` was `medium`, `high`, or `critical`, your "
+                "NEXT action MUST be:\n\n"
+                '    {"kind": "tool", "name": "corpus.promote_finding", '
+                '"args": {"candidate_id": "<the candidate id>", '
+                '"severity": "<the same severity_hint>"}}\n\n'
+                "Severity-low and severity-info Candidates are NOT promoted "
+                "— they stay in the corpus as Candidates only, for the "
+                "operator to review. Promoting a low/info Candidate is a "
+                "policy violation. Do NOT propose a `corpus.promote_finding` "
+                "for a Candidate not visible in this run's pool — the "
+                "consistency layer rejects cross-run promotion.\n\n"
             )
         return (
             f"{objective_block}"
