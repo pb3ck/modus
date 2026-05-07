@@ -10,6 +10,54 @@ notice.
 
 ## [Unreleased]
 
+### Architecture
+
+- **Tools-first action grammar (ADR-0004).** The closed v0.1
+  typed-action vocabulary is extended with a single open
+  primitive — `Tool(name, args)` — backed by an operator-
+  configurable `ToolRegistry`. The agent reaches recon shells
+  (`amass.enum`, `nuclei.scan`), Modus's typed-action builtins
+  (`probe`, `request`, `compare`, `differential`, `annotate`,
+  `hypothesize`), and any custom shell or MCP tool the operator
+  declares in their scope file's `tools` block. Closes #6, #7, #8,
+  #9, #10.
+  - **Six small-fix milestones land here** that together pivot
+    Modus from "autonomous within the focused-attack stage" to
+    "autonomous across recon → exploit → evidence":
+    1. `Tool` action variant in the typed grammar (#6).
+    2. `ToolRegistry` + `ToolSpec` with three invocation
+       backends (`shell` / `mcp` / `builtin`) and a JSON-Schema-
+       declared args shape; loadable from the scope file's
+       `tools` block (#7).
+    3. Generic `ToolExecutor` dispatching shell (asyncio
+       subprocess with placeholder-substituted argv, 64 KB
+       output cap, per-tool timeout, scoped env), builtin
+       (dotted-path resolution + invocation), and MCP-passthrough
+       (stub for v0.3.0; real client-side implementation
+       deferred) (#8).
+    4. Consistency layer dispatches `Tool` actions through the
+       registry's per-tool preconditions; `tool_registered:<name>`,
+       `tool_args_missing_required:<tool>:<arg>`, and
+       `tool_args_unknown_field:<tool>:<arg>` join the
+       precondition-label vocabulary (#9).
+    5. `amass.enum` and `nuclei.scan` first-party builtins with
+       scope-gating preconditions; `tool` MCP surface lets
+       operators dispatch any registered tool from the
+       verified-action conversation; `ModusServer` constructed
+       with a `ToolExecutor` that routes through the registry
+       (#10).
+    6. README / ADR-0002 §4 / ADR-0003 §6 amended to reflect the
+       agent-first / tools-first framing; ADR-0004 published as
+       the load-bearing decision record (#11).
+- **Submission line stays structural under the new grammar.** No
+  `submit`/`publish`/`post`/`report` *tool* is registered in the
+  default registry, and adding one is project-policy off-limits.
+  The agent can emit a `Tool` action with any name, but the
+  consistency layer rejects with `tool_registered:<name>` if it
+  isn't in the registry. Same firewall guarantee as the closed-
+  grammar version, surfaced through registry membership rather
+  than the action-union discriminator.
+
 ### Changed
 
 - **Submission policy revised.** The structural firewall (no

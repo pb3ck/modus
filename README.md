@@ -32,47 +32,53 @@ the decision and the act remain the operator's.
 
 ## What this is
 
-- **An autonomous agent**, primarily. The operator points their
-  MCP host at Modus and invokes the autonomous-session tool.
-  Modus runs the propose-prune-rank-execute loop internally —
-  sampling N candidate actions from its own LLM provider per
-  step, pruning the inconsistent ones via the Z3 consistency
-  check, ranking the survivors by expected information gain,
-  and executing the top-K under a budget. The host never sees
-  the inner loop; it sees a single tool call that returns a
-  batch of Candidates.
-- **An MCP server**, in delivery. Both the autonomous session
-  tools and the underlying typed-action tools (probe, request,
-  compare, differential, annotate, hypothesize) are exposed
-  over MCP. So is Quarry's read surface — Modus proxies Quarry
-  through the same server, so the operator configures one MCP
-  endpoint, not two. Operators who want full transparency can
-  drive the typed-action tools step-by-step from the host;
-  operators who want agency invoke the autonomous-session tool.
-- **A Quarry-native agent.** The corpus, the retrieval surface,
-  the analytical modules, the Candidate/Finding lifecycle, the
-  cross-engagement memory all live in Quarry. Modus depends on
-  Quarry's MCP surface; it does not reimplement any of it.
-- **A submission firewall enforced by storage.** Every action
-  Modus emits — autonomous loop or single tool call — terminates
-  in a Quarry row (observation, comparison, annotation,
-  Candidate). No `submit`, `report`, or `publish` tool exists in
-  Modus's MCP surface, and none will be added. Promotion to a
-  Finding is the operator's `quarry finding promote`, run outside
-  Modus, after the session ends. Modus's rationales may *recommend*
-  promotion or external submission — the structural firewall is the
-  absence of a submission action, not a ban on operator-facing
-  recommendations.
+- **An autonomous agent with an open tool registry.** The operator
+  points their MCP host at Modus and invokes the autonomous-session
+  tool. Modus runs the propose-prune-rank-execute loop internally,
+  reaching every tool the operator's registered: recon shells
+  (`amass`, `nuclei`), the typed-action surface (`probe`,
+  `request`, `compare`, `differential`, `annotate`, `hypothesize`),
+  Quarry's corpus tools, host-side MCP servers, and any custom
+  shell or MCP tool the operator declares in their scope file's
+  `tools` block. The agent isn't bounded by a closed grammar; it's
+  bounded by what the registry exposes. (See ADR-0004 for the
+  pivot from the closed v0.1 vocabulary.)
+- **An MCP server**, in delivery. The full tool surface — typed
+  actions, the generic `tool` dispatch, Quarry passthroughs,
+  autonomous-session controls (start / poll / cancel /
+  run / propose) — is registered as MCP tools. Operators who want
+  full transparency drive individual tools step-by-step from the
+  host; operators who want agency invoke `start_autonomous_session`
+  and let the loop run.
+- **Quarry-aware, not Quarry-native.** Quarry's analytical modules
+  and read surface are first-party tool registrations
+  (`corpus.search`, `analyze_jsdelta`, etc., proxied through
+  Modus's MCP server). Quarry is the default storage backend and
+  the cross-engagement memory; Modus depends on it but isn't
+  subordinate to its data model. Other tools' observations live
+  alongside Quarry rows in the same in-session pool.
+- **A submission firewall enforced by registry membership.** No
+  `submit`, `report`, `publish`, or `post` tool is registered in
+  the default registry, and adding one is project-policy
+  off-limits. The agent can emit a `Tool` action with any name,
+  but the consistency layer rejects with
+  `tool_registered:<name>` if it isn't in the registry. Promotion
+  to a Finding is the operator's `quarry finding promote`, run
+  outside Modus. Rationales may *recommend* promotion or
+  submission; the structural firewall is the registry's contents,
+  not a ban on operator-facing recommendations.
 
 ## What this isn't
 
 - Not a scanner. Modus reasons about what to do next given
-  current corpus state. Recon and traffic harvesting belong
-  upstream of Quarry's ingest layer; Modus consumes what they
-  produced and generates targeted active traffic of its own.
-- Not a corpus. Quarry is the corpus. Modus stores nothing
-  about evidence, assets, or findings outside what Quarry
-  already models.
+  current corpus state, and it can drive scanners as registered
+  tools (`nuclei.scan`, `amass.enum`, anything operator-declared).
+  The scanner is the *muscle*; Modus's autonomous loop is the
+  *direction*. Without the loop, a scanner just generates noise.
+- Not a corpus. Quarry is the default storage backend; Modus's
+  in-session observation pool flushes to Quarry for cross-session
+  memory. Modus does not duplicate Quarry's ingestion or its
+  Finding lifecycle.
 - Not a model wrapper. Modus has its own LLM provider for the
   autonomous loop, but it is provider-portable
   (Anthropic / OpenAI / OpenAI-compatible: Ollama, vLLM,
@@ -100,36 +106,42 @@ supposed to multiply.
 
 Modus takes a different bet, in five parts.
 
-- The action vocabulary is **typed**. The agent (Modus's own,
-  inside the autonomous loop; or the host's, when driving Modus
-  step-by-step) emits actions drawn from a defined grammar, not
-  arbitrary shell commands. The vocabulary maps to an MCP tool
-  surface, so any MCP-aware host's LLM produces grammatical
-  proposals by construction.
-- The consistency check is **formal**. Each proposed action is
-  validated against preconditions and current corpus state via
-  an SMT solver before any side effect. Used as a *pruner over
-  sampled proposals* in the autonomous loop, the solver
-  eliminates whole classes of invalid action before any network
-  traffic is generated.
-- The corpus is **Quarry**. Every action, result, and Candidate
-  is a typed row in Quarry's storage layer, accessed over MCP.
-  Reviewing what Modus did last Tuesday is `quarry session show`
-  or a SQLite query, not a log scrape. Sessions across
-  engagements share a single substrate.
+- The action surface is a **typed registry**. Every action the
+  agent emits is a Pydantic-validated `Tool(name, args)` (or one
+  of the typed-action fast paths — `Probe`, `Request`, etc.).
+  The registry declares what `name` values are dispatchable and
+  what each tool's `args` shape is; adding a new capability is
+  one operator-authored entry in the scope file's `tools` block.
+  The closed v0.1 vocabulary is gone; the trust boundary is the
+  registry's contents.
+- The consistency check is **formal and per-tool**. Each proposed
+  action is validated against scope and corpus state via an SMT
+  solver before any side effect. Each tool spec declares its own
+  preconditions function (the registry is the dispatch table for
+  Z3); built-in tools ship scope-gating preconditions
+  (`amass.enum` requires the domain in scope, `nuclei.scan`
+  requires the URL's `(host, port, tls)` in
+  `allowed_endpoints`). The autonomous loop uses Z3 as a *pruner
+  over sampled proposals*.
+- The corpus is **Quarry**. Cross-engagement memory, structured
+  storage, and the analytical modules
+  (`analyze_regression` / `analyze_jsdelta` / `analyze_interesting`)
+  live in Quarry, exposed through Modus's tool registry as
+  `corpus.*` entries. Reviewing what Modus did is
+  `quarry session show` or a SQLite query, not a log scrape.
 - The agent is **delivered through MCP**. The operator picks
   the host (Claude Desktop, Claude Code, Cursor, any MCP-aware
   host); the host picks the model the *host* runs. Modus's own
   internal LLM (used by the autonomous loop) is a separate,
   provider-portable choice the operator makes via env vars.
   Modus is not locked to any provider on either side.
-- The submission line is **storage-enforced**. Modus's terminal
-  state is a Candidate in Quarry. Promotion is Quarry's
-  `quarry finding promote`, run by the operator. No `submit`,
-  `publish`, or `post` action exists in Modus's grammar; the
-  structural firewall is the absence of an outbound action, not
-  a ban on the agent's rationale recommending the operator
-  promote or submit.
+- The submission line is **structural**. No `submit`, `publish`,
+  `post`, or `report` tool is registered in the default registry,
+  and adding one is project-policy off-limits. The agent can
+  emit a `Tool` action with any name, but the consistency layer
+  rejects with `tool_registered:<name>` if it isn't in the
+  registry. Promotion to a Finding is the operator's
+  `quarry finding promote`, run outside Modus.
 
 These five commitments are the invariants. The specific MCP
 host, the specific LLM provider, the specific Z3 encoding, the
@@ -152,37 +164,50 @@ invariants don't.
                  │ MCP (stdio, JSON-RPC)         │ used inside
                  ▼                               │ autonomous loop
         ┌────────────────────────────────────────┴─────────┐
-        │                  modus mcp                       │
+        │                   modus mcp                      │
         │                                                  │
-        │  ┌──────────────────────┐  ┌─────────────────┐   │
-        │  │ autonomous-session   │  │ verified-action │   │
-        │  │ tools (loop inside)  │  │ tools (one-shot)│   │
-        │  └──────────┬───────────┘  └────────┬────────┘   │
+        │  autonomous-session tools          typed-action  │
+        │  (start / poll / cancel / run /     surface +    │
+        │   propose)                          generic tool │
         │             │                       │            │
         │             ▼                       ▼            │
         │       ┌────────────────────────────────────┐     │
-        │       │ Z3 consistency check + scope       │     │
-        │       └─────────────────┬──────────────────┘     │
-        │                         │                        │
-        │             ┌───────────┴────────────┐           │
-        │             ▼                        ▼           │
-        │       ┌────────────────┐     ┌────────────────┐  │
-        │       │ HTTP executor  │     │ Quarry MCP cli │  │
-        │       └───────┬────────┘     └───────┬────────┘  │
-        └───────────────┼──────────────────────┼───────────┘
-                        ▼                      ▼
-                 in-scope target          quarry mcp
-                                              │
-                                              ▼
-                                    Quarry corpus (SQLite)
-                                              │
-                                              ▼
-                                         Candidates
-                                              │
-                                              ▼
-                            (operator runs `quarry finding promote`
-                             to lift to Finding — outside Modus)
+        │       │  Z3 consistency check  ──┐         │     │
+        │       │  (per-tool preconds)     ▼         │     │
+        │       │                  ┌──────────────┐  │     │
+        │       │                  │ ToolRegistry │  │     │
+        │       │                  └──────┬───────┘  │     │
+        │       └─────────────────────────┼──────────┘     │
+        │                                 ▼                │
+        │                         ┌─────────────────┐      │
+        │                         │  ToolExecutor   │      │
+        │                         └─┬──────┬──────┬─┘      │
+        │                           │      │      │        │
+        │                           ▼      ▼      ▼        │
+        │                       shell  builtin   mcp       │
+        │           (amass, nuclei, …) (request, hypoth) (host MCP)
+        └───────────────┬──────────────────┬───────────────┘
+                        ▼                  ▼
+                 in-scope target       quarry mcp
+                                          │
+                                          ▼
+                                  Quarry corpus (SQLite)
+                                          │
+                                          ▼
+                                      Candidates
+                                          │
+                                          ▼
+                       (operator runs `quarry finding promote`
+                        to lift to Finding — outside Modus)
 ```
+
+Every action — typed-action fast path or generic `tool` dispatch —
+flows through the same registry-driven Z3 check, then through the
+`ToolExecutor`, then to one of three backends. Quarry is one
+backend (`builtin` invocations targeting `corpus.*` registry
+entries) among many; recon shells (`amass`, `nuclei`) and any
+operator-declared tools share the path. ADR-0004 documents the
+pivot from the closed v0.1 vocabulary to this shape.
 
 The operator configures Modus as an MCP server in their host's
 settings:

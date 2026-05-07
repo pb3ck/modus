@@ -29,6 +29,11 @@ roughly grouped as follows:
   — Modus is an autonomous agent exposed as an MCP server.
   Both autonomous-session tools and verified-action tools are
   always present.
+- [`adr/0004-tools-first-action-grammar.md`](./adr/0004-tools-first-action-grammar.md)
+  — the v0.3 pivot: a single `Tool(name, args)` primitive plus
+  an open `ToolRegistry` replaces the closed typed-action
+  vocabulary. Extends ADR-0001; amends ADR-0002 §4 and
+  ADR-0003 §6.
 - [`corpus-interface.md`](./corpus-interface.md) — the contract
   Modus places on its corpus substrate, pinned to Quarry's MCP
   surface.

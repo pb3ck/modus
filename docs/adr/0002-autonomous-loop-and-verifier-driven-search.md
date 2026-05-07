@@ -144,6 +144,16 @@ outbound submission. The structural absence of a submit action
 is what enforces the gate; the rationale's content is the
 operator's tool, not the firewall's.
 
+**Amended 2026-05-07 (ADR-0004):** the closed action vocabulary
+is replaced by an open `ToolRegistry`. The submission-line
+guarantee re-surfaces through the registry's trust boundary: no
+`submit`/`publish`/`post`/`report` *tool* is registered in the
+default registry, and adding one is project-policy off-limits
+(equivalent to forking and removing the firewall). The
+agent-emission firewall is the same — `tool_registered:<name>`
+fails the consistency check if the name isn't in the registry.
+The terminal-state-in-storage guarantee is unchanged.
+
 ## Consequences
 
 ### Positive

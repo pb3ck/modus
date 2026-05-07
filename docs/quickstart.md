@@ -201,7 +201,7 @@ Modus. See [Quarry's findings doc](https://github.com/pb3ck/quarry/blob/main/doc
 - [`corpus-interface.md`](./corpus-interface.md) — the contract
   Modus places on Quarry. Useful when troubleshooting corpus
   passthroughs.
-- [`adr/`](./adr/) — the design decisions behind the four
-  invariants (typed vocabulary, formal consistency, Quarry-as-
-  corpus, storage-enforced submission line).
+- [`adr/`](./adr/) — design decisions, including ADR-0004 (the
+  v0.3 pivot from a closed typed-action vocabulary to an open
+  tool registry).
 - [`../ROADMAP.md`](../ROADMAP.md) — what's next for Modus.

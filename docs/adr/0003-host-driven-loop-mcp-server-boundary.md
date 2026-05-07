@@ -167,6 +167,20 @@ storage, not an outbound submission. The structural absence of
 a submit-shaped action is the gate; the rationale's content is
 the operator's input, not the firewall's surface.
 
+**Amended 2026-05-07 (ADR-0004):** the structural firewall now
+lives in the `ToolRegistry`. No `submit`/`publish`/`post`/`report`
+*tool* is registered in the default registry; adding one is
+project-policy off-limits. Both autonomous-session and verified-
+action surfaces dispatch through the same registry, so neither
+can reach a submission tool the registry doesn't expose.
+
+Quarry's MCP passthroughs (the section above's "second class")
+are now first-party registry entries (`corpus.search`,
+`corpus.list_assets`, etc.) — they're the same shape as
+`amass.enum` or any operator-declared tool. The "tool list" still
+contains the same operator-visible surface; what changes is the
+internal classification.
+
 ### 7. "Autonomous within scope" is delivered by surface A
 
 The operator who wants real agency calls Modus's
