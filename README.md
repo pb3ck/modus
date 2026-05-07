@@ -20,9 +20,12 @@ just kicks it off and reads the result. The single hard human gate
 is on the way out: **Modus never submits. Modus never tells the
 operator to submit.**
 
-> **Status: pre-alpha (0.0.0).** The v0.1 skeleton is being laid
-> down. Nothing here runs end-to-end yet; expect every file to
-> change.
+> **Status: alpha (0.1.0a1).** The autonomous loop runs end-to-end
+> against authorized targets — see [`docs/quickstart.md`](./docs/quickstart.md).
+> The action vocabulary, the consistency check, the corpus
+> interface, and the submission-line invariant are committed
+> surfaces; everything else may shift between alpha releases until
+> 1.0.
 
 ## What this is
 

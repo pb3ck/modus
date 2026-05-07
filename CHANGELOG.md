@@ -10,6 +10,28 @@ notice.
 
 ## [Unreleased]
 
+## [0.1.0a1] — 2026-05-07
+
+First alpha. Modus is an autonomous offensive agent delivered as
+an MCP server; the operator drives it from any MCP-aware host
+(Claude Desktop primarily). The propose-prune-rank-execute loop
+runs end-to-end inside the autonomous-session MCP tool. The
+verified-action surface, Quarry passthroughs, and
+autonomous-session tools are all always-present in the tool list
+per ADR-0003. Verified live against OWASP Juice Shop:
+end-to-end recon, IDOR-shaped differentials, the submission line
+held across every run.
+
+The four invariants — typed action vocabulary, formal
+consistency checking, Quarry-backed corpus, storage-enforced
+submission line — are committed surfaces. Everything else may
+shift between alpha releases until 1.0.
+
+The full change set since the empty-skeleton commit is
+catalogued in the section below.
+
+## Pre-release work (rolled into 0.1.0a1)
+
 ### Added
 
 - Initial repository skeleton: README, ROADMAP, LICENSE, CONTRIBUTING,

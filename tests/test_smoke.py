@@ -11,8 +11,15 @@ import modus
 
 
 def test_version_is_set() -> None:
-    assert modus.__version__ == "0.0.0"
+    assert modus.__version__ == "0.1.0a1"
 
 
 def test_version_is_string() -> None:
     assert isinstance(modus.__version__, str)
+
+
+def test_version_matches_pep440_alpha_form() -> None:
+    # Loose check that we're shipping a recognisable PEP 440 pre-release.
+    import re
+
+    assert re.match(r"^\d+\.\d+\.\d+(a|b|rc)\d+$", modus.__version__)

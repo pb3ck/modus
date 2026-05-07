@@ -110,21 +110,31 @@ operator's later review and would be a defensible Finding under
 standard bounty triage. The session is reproducible from the
 corpus alone.
 
-## Milestone 5 — v0.1 release
+## Milestone 5 — v0.1 alpha release (0.1.0a1 shipped)
 
-The v0.1 bug-class scope is implemented end-to-end across both
-surfaces. Documentation is complete enough for an external
-operator to install Modus, configure it in Claude Desktop,
-configure their Modus-internal LLM provider, point it at a
-Quarry target, and run a session — landing Candidates in Quarry
-for promotion. The audit surface (every action sampled, every
-Z3 verdict, every executed action, every Candidate) is
-queryable from Quarry.
+First alpha is out. The v0.1 bug-class scope is implemented
+end-to-end across both surfaces; docs are complete enough for an
+external operator to set up Modus + Claude Desktop + Quarry and
+run a session — see [`docs/quickstart.md`](./docs/quickstart.md).
+The audit surface (every action sampled, every Z3 verdict, every
+executed action, every Candidate) is queryable from Quarry.
 
-Exit criteria: an external user (someone who is not the
-maintainer) sets up Modus + Claude Desktop + Quarry against a
-lab environment and produces a session summary without operator
-hand-holding.
+What 0.1.0a1 ships with:
+- 18 always-present MCP tools (verified-action + Quarry-passthrough
+  + autonomous-session).
+- Host-sampling proposer (`MODUS_LLM_PROVIDER=host`) routing
+  proposals back through the MCP host, plus direct-API providers
+  for hosts that don't support sampling.
+- Scope encoded as `(host, port, tls)` triples; consistency layer
+  gates Request actions on the full triple.
+- HTTP executor with same-origin redirect following.
+- Submission line storage-enforced across every action class.
+
+Promoted from "exit criteria" to "polish targets for 0.1.0":
+the external-operator-without-hand-holding test will gate the
+non-pre-release `0.1.0` tag. 0.1.0a1 ships the docs that *enable*
+that test; whether the docs are sufficient is what subsequent
+alpha releases will refine.
 
 ## Beyond v0.1
 

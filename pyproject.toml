@@ -1,7 +1,7 @@
 [project]
 name = "modus"
-version = "0.0.0"
-description = "Offensive agent built on a typed action vocabulary, formal consistency checking, and human-promoted findings."
+version = "0.1.0a1"
+description = "Autonomous offensive agent built on a typed action vocabulary, formal consistency checking, and a Quarry-backed corpus."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-or-later"
@@ -14,12 +14,14 @@ keywords = [
     "offensive-security",
     "bug-bounty",
     "agent",
+    "autonomous-agent",
     "llm",
+    "mcp",
     "smt",
     "z3",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
@@ -27,6 +29,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
 ]
 

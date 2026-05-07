@@ -32,9 +32,12 @@ roughly grouped as follows:
 - [`corpus-interface.md`](./corpus-interface.md) — the contract
   Modus places on its corpus substrate, pinned to Quarry's MCP
   surface.
+- [`quickstart.md`](./quickstart.md) — five-step
+  install-to-first-session walkthrough. Start here.
 - [`mcp-host-integration.md`](./mcp-host-integration.md) —
-  operator-facing setup for Claude Desktop, Claude Code, and
-  other MCP-aware hosts.
+  full operator-facing setup reference for Claude Desktop,
+  Claude Code, and other MCP-aware hosts; provider options;
+  containerised Quarry.
 
 ## Planned documents
 
