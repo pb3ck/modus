@@ -442,8 +442,19 @@ class ModusServer:
             return {"error": "observations not in this session's pool"}
         diffs: dict[str, Any] = {}
         for dim in action.dimensions:
-            diffs[dim] = {"a": a.payload.get(dim), "b": b.payload.get(dim)}
-        return {"observation_a": a.id, "observation_b": b.id, "diffs": diffs}
+            value_a = _extract_dimension(a.payload, dim)
+            value_b = _extract_dimension(b.payload, dim)
+            diffs[dim] = {
+                "a": value_a,
+                "b": value_b,
+                "differs": value_a != value_b,
+            }
+        return {
+            "observation_a": a.id,
+            "observation_b": b.id,
+            "diffs": diffs,
+            "any_differs": any(d["differs"] for d in diffs.values()),
+        }
 
     def _execute_differential(self, action: Differential) -> dict[str, Any]:
         present_ids = {obs.id for obs in self.session.observations}
@@ -645,6 +656,41 @@ class ModusServer:
         here.
         """
         return await self._execute_action(action)
+
+
+_COMPARE_DIMENSION_ALIASES: dict[str, tuple[str, ...]] = {
+    # Map the natural dimension names the agent emits onto the
+    # observation-payload field paths the executor actually stores.
+    # The executor's request observation stores body at
+    # ``response_body``, headers at ``response_headers``, etc.; the
+    # agent thinks of them as ``body`` and ``headers``.
+    "body": ("response_body",),
+    "response_body": ("response_body",),
+    "headers": ("response_headers",),
+    "response_headers": ("response_headers",),
+    "request_headers": ("request_headers",),
+    "status": ("status",),
+    "status_code": ("status",),
+    "method": ("method",),
+    "url": ("url",),
+    "path": ("url",),
+    "elapsed_ms": ("elapsed_ms",),
+}
+
+
+def _extract_dimension(payload: dict[str, Any], dimension: str) -> Any:
+    """Pull a ``Compare`` dimension value out of an observation payload.
+
+    Tolerant of the common synonyms an LLM proposer might use: ``body``
+    maps to ``response_body``, ``headers`` to ``response_headers``,
+    ``status_code`` to ``status``. Falls back to a direct key lookup so
+    the agent can still target raw payload keys when it knows them.
+    """
+    candidates = _COMPARE_DIMENSION_ALIASES.get(dimension, (dimension,))
+    for key in candidates:
+        if key in payload:
+            return payload[key]
+    return None
 
 
 def _candidates_to_payload(candidates: list[Any]) -> dict[str, Any]:

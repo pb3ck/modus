@@ -333,6 +333,50 @@ class TestCompareTool:
         )
         assert result["verdict"]["accepted"] is False
 
+    async def test_dimensions_resolve_to_observation_payload_fields(self) -> None:
+        # Compare uses dimension aliases — body/headers/status — and should
+        # find the values inside the request observation's actual schema
+        # (response_body, response_headers, status).
+        async def handler(request: httpx.Request) -> httpx.Response:
+            user = request.url.params.get("user_id", "?")
+            return httpx.Response(
+                200,
+                headers={"x-user": user},
+                text=f'{{"user_id": "{user}"}}',
+            )
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(), transport=httpx.MockTransport(handler)
+        )
+        # Seed two observations of the same path with different user ids.
+        await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/get?user_id=1"},
+        )
+        await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/get?user_id=2"},
+        )
+        obs_a, obs_b = session.observations[0].id, session.observations[1].id
+        result = await server._dispatch(
+            "compare",
+            {
+                "observation_a": obs_a,
+                "observation_b": obs_b,
+                "dimensions": ["body", "status", "headers"],
+            },
+        )
+        assert result["verdict"]["accepted"] is True
+        diffs = result["result"]["diffs"]
+        # Body actually populated (was None before the fix)
+        assert diffs["body"]["a"] == '{"user_id": "1"}'
+        assert diffs["body"]["b"] == '{"user_id": "2"}'
+        assert diffs["body"]["differs"] is True
+        # Status is identical between the two requests
+        assert diffs["status"]["differs"] is False
+        # any_differs aggregate captures the body difference
+        assert result["result"]["any_differs"] is True
+
 
 # ----------------------------------------------------------- quarry passthroughs
 
