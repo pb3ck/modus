@@ -101,11 +101,24 @@ discriminator:
 - ``probe(target, aspect=httpx|jsbundle|endpoints|tech)`` — read what \
   the corpus already knows about an asset. Passive; no network.
 - ``request(target, method, path, headers?, body?, port?, tls=true)`` \
-  — send one HTTP request to an in-scope asset. Method must be in the \
-  session's allowed-methods set. Defaults: ``tls=true`` (HTTPS) on the \
-  scheme's standard port. For local labs / non-standard ports set both: \
-  e.g. ``port=8080, tls=false`` produces ``http://target:8080/path``. \
-  Persists request/response pair as a session observation.
+  — send one HTTP request to an in-scope asset. ``target`` MUST be a \
+  bare hostname like ``"localhost"`` or ``"api.example.com"`` — NEVER \
+  a full URL. The scheme/port are set by the SEPARATE ``port`` and \
+  ``tls`` fields, not encoded into ``target``. Method must be in the \
+  session's allowed-methods set. ``path`` must start with ``/``. \
+  Defaults: ``tls=true`` (HTTPS) on the scheme's standard port. For \
+  the (host, port, tls) triples in scope below, copy the values \
+  EXACTLY into your action — including ``tls=false`` for plain HTTP. \
+  Worked example for ``host="localhost" port=13000 tls=false``: \
+  ``{"kind":"request","target":"localhost","port":13000,"tls":false,\
+  "method":"GET","path":"/robots.txt"}`` produces \
+  ``http://localhost:13000/robots.txt``. \
+  COMMON MISTAKE: emitting ``target="http://localhost:13000"`` with \
+  ``path="/robots.txt"`` and omitting ``port``/``tls`` — Pydantic \
+  accepts the shape, but the SMT layer rejects because ``tls`` \
+  defaulted to ``true`` and the (host, port, tls) triple no longer \
+  matches scope. Persists request/response pair as a session \
+  observation.
 - ``compare(observation_a, observation_b, dimensions)`` — diff two \
   existing observations along the named dimensions.
 - ``differential(observations, dimension=identity|auth|role|tenant, \
@@ -145,9 +158,31 @@ def _render_corpus_state(state: CorpusState) -> str:
 
 
 def _render_scope(scope: ScopePolicy) -> str:
+    """Render scope for the system prompt.
+
+    Exposes the parsed ``(host, port, tls)`` endpoint triples directly
+    so the model copies them into ``request`` actions verbatim. Showing
+    the URL-form ``allowed_assets`` list is misleading: the model treats
+    ``"http://host:port"`` as a candidate ``target`` value and drops
+    ``port``/``tls``, which then defaults to ``tls=true`` and fails the
+    Z3 endpoint check. The triples below are the ground truth.
+    """
+    endpoints = scope.endpoints()
+    if endpoints:
+        endpoint_block = (
+            "allowed_endpoints (use these EXACT values in `request` actions):\n"
+            + "\n".join(
+                f"  - host={e.host!r} port={e.port} tls={str(e.tls).lower()}" for e in endpoints
+            )
+        )
+    else:
+        endpoint_block = (
+            "allowed_endpoints: (none parseable; fall back to bare hostnames "
+            f"from allowed_hosts={sorted(scope.hosts())})"
+        )
     return (
         f"target_name={scope.target_name!r}\n"
-        f"allowed_assets={sorted(scope.allowed_assets)}\n"
+        f"{endpoint_block}\n"
         f"allowed_methods={sorted(scope.allowed_methods)}\n"
         f"user_agent={scope.user_agent!r}\n"
     )
