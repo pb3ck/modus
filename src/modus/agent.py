@@ -151,6 +151,14 @@ class AgentLoop:
         # re-propose actions that already ran. Capped at the most
         # recent ``HISTORY_TAIL`` entries to keep the prompt bounded.
         history: list[str] = []
+        # Observation IDs produced *in this run*. The Hypothesize
+        # consistency precondition gates evidence_refs to this set
+        # so the proposer can't cite observations bleeding in from
+        # prior ``run_autonomous_session`` calls that share the
+        # same ``ServerSession`` instance. Populated as the loop
+        # executes actions; passed into each step's CorpusState via
+        # ``_step_context``.
+        run_observations: set[str] = set()
 
         for step_index in range(self.budget.max_steps):
             if (time.monotonic() - wall_started) > self.budget.max_wall_seconds:
@@ -159,7 +167,10 @@ class AgentLoop:
 
             step_started = _utcnow()
             context = self._step_context(
-                objective_text, history=history, bug_classes=tuple(bug_classes)
+                objective_text,
+                history=history,
+                bug_classes=tuple(bug_classes),
+                run_observations=frozenset(run_observations),
             )
 
             # 1. Propose
@@ -215,6 +226,12 @@ class AgentLoop:
                 executed.append(chosen)
                 execution_results.append(result)
                 history.append(_summarise_step(step_index, chosen, result))
+                # Track observation IDs produced this run so the
+                # next step's Hypothesize precondition can gate
+                # evidence_refs to "this run only" — see #4.
+                obs_id = result.get("observation_id") or result.get("id")
+                if isinstance(obs_id, str) and obs_id:
+                    run_observations.add(obs_id)
                 empty_streak = 0
             else:
                 if not all_duplicates:
@@ -275,9 +292,21 @@ class AgentLoop:
         *,
         history: list[str],
         bug_classes: tuple[str, ...] = (),
+        run_observations: frozenset[str] | None = None,
     ) -> StepContext:
+        from dataclasses import replace as _dc_replace
+
+        # Wrap the session-wide corpus state with the per-run
+        # observation subset, so the consistency layer's Hypothesize
+        # precondition can gate evidence_refs to observations
+        # produced this autonomous run only. ``None`` means
+        # "non-autonomous code path" and falls back to the looser
+        # check; the autonomous loop always passes a frozenset
+        # (possibly empty), which selects the strict path.
+        base_state = self.session.corpus_state()
+        run_state = _dc_replace(base_state, session_observations=run_observations)
         return StepContext(
-            corpus_state=self.session.corpus_state(),
+            corpus_state=run_state,
             scope=self.session.scope,
             objective=objective,
             bug_classes=bug_classes,

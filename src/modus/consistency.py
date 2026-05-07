@@ -65,8 +65,31 @@ class CorpusState:
     ``modus action validate`` CLI flow."""
     allowed_methods: frozenset[str] = field(default_factory=frozenset)
     known_observations: frozenset[str] = field(default_factory=frozenset)
+    """All observation IDs visible to this session (process-lifetime
+    pool on the ``ServerSession``). The looser
+    ``evidence_known:<ref>`` precondition on ``Hypothesize`` checks
+    against this set — the verified-action surface uses this path."""
     known_evidence: frozenset[str] = field(default_factory=frozenset)
     known_referents: frozenset[str] = field(default_factory=frozenset)
+    session_observations: frozenset[str] | None = None
+    """Observation IDs produced *in the current autonomous run*, or
+    ``None`` for non-autonomous code paths.
+
+    Three-state semantics:
+
+      * ``None`` (default) — non-autonomous mode. The verified-action
+        surface and the ``modus action validate`` CLI flow leave this
+        unset, and the looser ``evidence_known:<ref>`` precondition
+        applies (citing any ``known_observation`` /
+        ``known_evidence`` is fine).
+      * ``frozenset()`` — autonomous mode, no observations produced
+        this run yet. ``Hypothesize.evidence_refs`` *must* be empty;
+        any cited observation is a bleed from a prior run.
+      * ``frozenset({...})`` — autonomous mode mid-run. Citations
+        must be a subset of this set; observations from the broader
+        ``known_observations`` pool that aren't here are bleed.
+
+    Populated by :meth:`AgentLoop._step_context`."""
 
     @classmethod
     def empty(cls) -> CorpusState:
@@ -210,6 +233,28 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
         ]
 
     if isinstance(action, Hypothesize):
+        # Two paths:
+        #   * Autonomous-run path: ``session_observations`` is a
+        #     ``frozenset`` (possibly empty) set by
+        #     ``AgentLoop._step_context``. Hypothesize must cite
+        #     only observations from this run — prevents prior-run
+        #     bleed where the proposer picks an obs_id from
+        #     ``known_observations`` that wasn't evidenced in the
+        #     current run. An empty per-run pool means *no*
+        #     citations are valid; the agent must produce evidence
+        #     before hypothesizing.
+        #   * Verified-action / CLI path: ``session_observations``
+        #     is ``None`` (default). The looser ``evidence_known``
+        #     check applies — the operator drives manually and is
+        #     presumed to know what they're citing.
+        if state.session_observations is not None:
+            return [
+                (
+                    f"evidence_in_session:{ref}",
+                    ref in state.session_observations,
+                )
+                for ref in action.evidence_refs
+            ]
         return [
             (
                 f"evidence_known:{ref}",

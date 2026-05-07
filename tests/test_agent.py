@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from modus.actions import Action, Probe
+from modus.actions import Action, Hypothesize, Probe
 from modus.agent import AgentLoop, Budget
 from modus.consistency import ConsistencyChecker
 from modus.proposer import FixedProposer
 from modus.scope import ScopePolicy
-from modus.session import ServerSession
+from modus.session import ServerSession, SessionObservation
 
 
 def _scope() -> ScopePolicy:
@@ -209,3 +209,105 @@ class TestSessionRecordSerialisation:
         assert payload["bug_classes"] == ["idor"]
         assert payload["step_count"] == 1
         assert payload["executed_count"] == 1
+
+
+class TestEvidenceRefsScopedToRun:
+    """Per-run gating of ``Hypothesize.evidence_refs`` (#4).
+
+    The ``ServerSession`` observation pool is process-lifetime, so
+    observations from a prior ``run_autonomous_session`` call are
+    visible in ``CorpusState.known_observations`` of the current
+    run. The ``session_observations`` constraint added by #4 stops
+    the proposer from citing those bleed-throughs as evidence; the
+    citation must point at an observation produced *this* run.
+    """
+
+    async def test_hypothesize_citing_run_observation_is_accepted(self) -> None:
+        # Step 0 produces an observation, step 1 hypothesizes
+        # against it. The Z3 layer must accept because the cited
+        # obs_id is in ``session_observations`` (this run's pool).
+        produced_obs_id = "obs-step-0"
+
+        async def executor(action: Action) -> dict[str, Any]:
+            return {"observation_id": produced_obs_id, "kind": action.kind}
+
+        proposer = FixedProposer(
+            [
+                Probe(target="target.example.com"),
+                Hypothesize(
+                    bug_class="idor",
+                    evidence_refs=(produced_obs_id,),
+                    rationale="**Vulnerability:** ... cites obs-step-0",
+                ),
+            ]
+        )
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=_bare_session(),
+            execute_action=executor,
+            budget=Budget(max_steps=2),
+        )
+        record = await loop.run(target_name="demo", bug_classes=["idor"])
+        # Both steps executed, both their proposals accepted.
+        assert record.steps[0].executed[0].kind == "probe"
+        assert record.steps[1].executed[0].kind == "hypothesize"
+        # No verdict on step 1 came back rejected.
+        assert all(v.accepted for v in record.steps[1].verdicts)
+
+    async def test_hypothesize_citing_prior_session_observation_is_rejected(
+        self,
+    ) -> None:
+        # Bleed simulation: the session pool contains an observation
+        # from a *prior* run_autonomous_session call. The proposer
+        # tries to cite it from a fresh autonomous run that hasn't
+        # produced any observations yet. The new
+        # ``session_observations`` precondition must reject —
+        # citing observations the agent didn't produce *this run*
+        # is the bug class #4 fixes.
+        bleed_obs_id = "obs-from-prior-run"
+        session = _bare_session()
+        # Pre-load the session pool with an observation as if a
+        # prior run had produced it.
+        session.observations.append(
+            SessionObservation(
+                id=bleed_obs_id,
+                kind="request",
+                payload={"status": 200},
+            )
+        )
+
+        executor = _RecordingExecutor()
+        proposer = FixedProposer(
+            [
+                Hypothesize(
+                    bug_class="idor",
+                    evidence_refs=(bleed_obs_id,),
+                    rationale="cites a prior-session observation",
+                )
+            ]
+        )
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=1, max_consecutive_empty_steps=1),
+        )
+        record = await loop.run(target_name="demo", bug_classes=["idor"])
+        # The hypothesize survived the proposer but Z3 rejected it
+        # because the evidence_ref isn't in this run's session
+        # observations (which are empty — no actions have executed
+        # yet that produced an observation).
+        assert len(record.steps) == 1
+        assert record.steps[0].executed == ()
+        assert any(not v.accepted for v in record.steps[0].verdicts)
+        # The unsat-core surface should name the offending obs_id.
+        rejecting = next(v for v in record.steps[0].verdicts if not v.accepted)
+        assert any(
+            name.startswith("evidence_in_session:" + bleed_obs_id)
+            for name in rejecting.failed_preconditions
+        )
+        # The recording executor never saw the action — Z3 rejected
+        # it before execution.
+        assert executor.calls == []
