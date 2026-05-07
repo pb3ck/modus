@@ -3,6 +3,10 @@
 > Autonomous offensive agent built on a typed action vocabulary,
 > formal consistency checking, and a Quarry-backed corpus.
 
+[![CI](https://github.com/pb3ck/modus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pb3ck/modus/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](./pyproject.toml)
+
 Modus is an autonomous offensive security agent for authorized bug
 bounty and penetration-testing work. It reasons over a Quarry corpus,
 proposes typed actions against in-scope targets, formally verifies
