@@ -51,3 +51,30 @@ class TestScopePolicy:
         policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
         with pytest.raises(ValidationError):
             policy.target_name = "other"  # type: ignore[misc]
+
+    def test_default_user_agent_is_conservative(self) -> None:
+        from modus.scope import DEFAULT_USER_AGENT
+
+        policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
+        # Default should identify the tool generically without leaking
+        # the project URL or any operator-specific details.
+        assert policy.user_agent == DEFAULT_USER_AGENT
+        assert policy.user_agent.startswith("Modus/")
+        assert "github" not in policy.user_agent
+        assert "(" not in policy.user_agent  # no parenthetical UA comment in default
+
+    def test_custom_user_agent_round_trips(self) -> None:
+        policy = ScopePolicy(
+            target_name="acme-bbp",
+            allowed_assets=frozenset({"a.example.com"}),
+            user_agent="ResearcherX/Modus (acme-bbp)",
+        )
+        assert policy.user_agent == "ResearcherX/Modus (acme-bbp)"
+
+    def test_user_agent_must_be_non_empty(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                user_agent="",
+            )

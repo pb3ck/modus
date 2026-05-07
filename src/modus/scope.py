@@ -17,14 +17,25 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from modus import __version__
+
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+#: Default User-Agent sent on outbound HTTP requests when the scope
+#: policy doesn't override it. Conservative on purpose — identifies
+#: the tool generically without leaking the project URL or any
+#: operator-identifying information. Bug-bounty programs commonly
+#: require a hunter-identifying header; operators set
+#: :attr:`ScopePolicy.user_agent` per engagement to comply.
+DEFAULT_USER_AGENT = f"Modus/{__version__}"
 
 
 class ScopePolicy(BaseModel):
     """Operator-authored scope envelope for a single Modus session.
 
-    Two axes:
+    Three axes:
 
     * **Asset scope** — which hostnames the agent may touch.
       Hostnames are matched exactly. Wildcards are expanded by the
@@ -34,6 +45,12 @@ class ScopePolicy(BaseModel):
     * **Method scope** — which HTTP methods the session permits.
       Defaults to read-only (``GET``, ``HEAD``, ``OPTIONS``); the
       operator must opt into write methods explicitly.
+    * **HTTP identification** — the User-Agent sent on outbound
+      requests. The default is conservative; operators override per
+      engagement (e.g. some bug-bounty programs require a
+      researcher-identifying header, some forbid bug-bounty UA
+      strings). Per-request overrides via the action's ``headers``
+      take precedence over this default.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -43,6 +60,7 @@ class ScopePolicy(BaseModel):
     allowed_methods: frozenset[str] = Field(
         default_factory=lambda: frozenset({"GET", "HEAD", "OPTIONS"})
     )
+    user_agent: str = Field(default=DEFAULT_USER_AGENT, min_length=1, max_length=512)
 
     @field_validator("allowed_assets")
     @classmethod
@@ -70,4 +88,4 @@ class ScopePolicy(BaseModel):
         return cls.model_validate_json(path.read_text())
 
 
-__all__ = ["ScopePolicy"]
+__all__ = ["DEFAULT_USER_AGENT", "ScopePolicy"]

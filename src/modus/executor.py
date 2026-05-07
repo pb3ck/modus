@@ -69,10 +69,15 @@ class HttpExecutor:
     Use as an async context manager so the underlying client is
     closed on shutdown. The executor is stateless across calls —
     every request opens a fresh connection unless the host pools.
+
+    The ``user_agent`` is the default User-Agent header for outbound
+    requests; per-request action headers override it. Set this from
+    :attr:`modus.scope.ScopePolicy.user_agent` so the operator's
+    engagement-specific identification flows through.
     """
 
     timeout_seconds: float = 30.0
-    user_agent: str = "modus/0.0.0 (autonomous offensive agent; +https://github.com/pb3ck/modus)"
+    user_agent: str = "Modus/0.0.0"
     follow_redirects: bool = False
     verify_tls: bool = True
     extra_default_headers: dict[str, str] = field(default_factory=dict)

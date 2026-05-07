@@ -628,7 +628,9 @@ async def serve(scope_path: Path) -> int:
 
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(session)
-        executor = await stack.enter_async_context(HttpExecutor())
+        executor = await stack.enter_async_context(
+            HttpExecutor(user_agent=session.scope.user_agent)
+        )
         modus = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
         server = modus._server()
         async with stdio_server() as (read, write):

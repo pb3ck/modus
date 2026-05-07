@@ -222,6 +222,64 @@ class TestRequestTool:
         assert result["result"]["status"] == 200
         assert len(session.observations) == 1
 
+    async def test_user_agent_comes_from_scope_policy(self) -> None:
+        seen_user_agent: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_user_agent.append(request.headers.get("user-agent", ""))
+            return httpx.Response(200, text="ok")
+
+        # Use a custom scope with a non-default user_agent
+        scope = ScopePolicy(
+            target_name="acme-bbp",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            user_agent="ResearcherX/Modus (acme-bbp)",
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = HttpExecutor(user_agent=session.scope.user_agent)
+        executor._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"User-Agent": session.scope.user_agent},
+        )
+        server = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+        await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/"},
+        )
+        assert seen_user_agent == ["ResearcherX/Modus (acme-bbp)"]
+
+    async def test_action_headers_override_scope_user_agent(self) -> None:
+        seen_user_agent: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_user_agent.append(request.headers.get("user-agent", ""))
+            return httpx.Response(200, text="ok")
+
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            user_agent="Default/Modus",
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = HttpExecutor(user_agent=session.scope.user_agent)
+        executor._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"User-Agent": session.scope.user_agent},
+        )
+        server = ModusServer(session=session, executor=executor, checker=ConsistencyChecker())
+        await server._dispatch(
+            "request",
+            {
+                "target": "target.example.com",
+                "method": "GET",
+                "path": "/",
+                "headers": {"User-Agent": "OverrideUA/1.0"},
+            },
+        )
+        assert seen_user_agent == ["OverrideUA/1.0"]
+
     async def test_disallowed_method_rejected(self) -> None:
         server, session = _server_with(quarry=_FixedCorpusClient())
         result = await server._dispatch(
