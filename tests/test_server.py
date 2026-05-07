@@ -222,6 +222,50 @@ class TestRequestTool:
         assert result["result"]["status"] == 200
         assert len(session.observations) == 1
 
+    async def test_follows_same_origin_redirect_to_trailing_slash(self) -> None:
+        # Common Next.js / FastAPI behaviour: GET /path → 308 → /path/.
+        # The executor should follow the redirect within the same
+        # origin and surface the chain on the observation.
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/Users":
+                return httpx.Response(308, headers={"location": "/api/Users/"})
+            if request.url.path == "/api/Users/":
+                return httpx.Response(200, text='{"ok": true}')
+            return httpx.Response(404)
+
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(), transport=httpx.MockTransport(handler)
+        )
+        result = await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/api/Users"},
+        )
+        assert result["verdict"]["accepted"] is True
+        assert result["result"]["status"] == 200
+        assert result["result"]["redirect_chain"] == ["https://target.example.com/api/Users/"]
+        assert "/api/Users/" in result["result"]["url"]
+
+    async def test_does_not_follow_cross_origin_redirect(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "target.example.com":
+                return httpx.Response(302, headers={"location": "https://evil.example.com/"})
+            # Should never reach here — but if we do, surface it as 200
+            # so the test fails on assertion rather than timeout.
+            return httpx.Response(200, text="WAS FOLLOWED — BAD")
+
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(), transport=httpx.MockTransport(handler)
+        )
+        result = await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/"},
+        )
+        assert result["result"]["status"] == 302
+        assert result["result"]["redirect_chain"] == []
+        # Cross-origin Location is preserved in the response headers
+        # so the agent can decide what to do with it.
+        assert result["result"]["response_headers"]["location"] == "https://evil.example.com/"
+
     async def test_plaintext_http_with_port_targets_correct_url(self) -> None:
         seen_urls: list[str] = []
 

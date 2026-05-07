@@ -24,6 +24,7 @@ the public surface is :meth:`ConsistencyChecker.prune`, which takes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import z3
 
@@ -36,6 +37,9 @@ from modus.actions import (
     Probe,
     Request,
 )
+
+if TYPE_CHECKING:
+    from modus.scope import AllowedEndpoint
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,12 @@ class CorpusState:
     """
 
     in_scope_assets: frozenset[str] = field(default_factory=frozenset)
+    allowed_endpoints: tuple[AllowedEndpoint, ...] = ()
+    """Parsed scope entries — used to gate ``Request`` actions on the
+    full ``(host, port, tls)`` triple, not just the hostname. Empty
+    tuple means "no endpoint constraint beyond ``in_scope_assets`` host
+    membership", which is the default for tests and the
+    ``modus action validate`` CLI flow."""
     allowed_methods: frozenset[str] = field(default_factory=frozenset)
     known_observations: frozenset[str] = field(default_factory=frozenset)
     known_evidence: frozenset[str] = field(default_factory=frozenset)
@@ -136,8 +146,25 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
         ]
 
     if isinstance(action, Request):
+        # Two checks: hostname-only membership (for back-compat with
+        # scopes that don't specify port/tls) AND full-endpoint
+        # membership (when allowed_endpoints is populated, which
+        # tightens scope down to specific scheme+port combinations).
+        # Tests and CLI flows that don't populate allowed_endpoints
+        # see only the hostname check, matching the original
+        # behaviour.
+        scheme = "https" if action.tls else "http"
+        port_part = f":{action.port}" if action.port is not None else ""
+        endpoint_label = f"endpoint_in_scope:{scheme}://{action.target}{port_part}"
+        endpoint_ok = (
+            any(
+                ep.matches(action.target, action.port, action.tls) for ep in state.allowed_endpoints
+            )
+            if state.allowed_endpoints
+            else action.target in state.in_scope_assets
+        )
         return [
-            (f"target_in_scope:{action.target}", action.target in state.in_scope_assets),
+            (endpoint_label, endpoint_ok),
             (f"method_allowed:{action.method}", action.method in state.allowed_methods),
         ]
 

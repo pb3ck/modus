@@ -19,6 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -33,6 +34,11 @@ class HttpObservation:
     Mirrors the shape Quarry's ``responses`` adapter ingests, so the
     operator can later round-trip the session pool into Quarry via
     ``quarry ingest --source responses``.
+
+    ``redirect_chain`` lists every URL the executor followed before
+    arriving at the final response — empty when no redirects were
+    followed. Useful audit trail when the agent's intended endpoint
+    differs from the one that actually answered.
     """
 
     id: str
@@ -45,6 +51,7 @@ class HttpObservation:
     response_body: str
     elapsed_ms: float
     error: str | None = None
+    redirect_chain: tuple[str, ...] = ()
 
     def as_payload(self) -> dict[str, Any]:
         """Serialise to a dict the consistency layer can stash."""
@@ -59,6 +66,7 @@ class HttpObservation:
             "response_body": self.response_body,
             "elapsed_ms": self.elapsed_ms,
             "error": self.error,
+            "redirect_chain": list(self.redirect_chain),
         }
 
 
@@ -78,15 +86,26 @@ class HttpExecutor:
 
     timeout_seconds: float = 30.0
     user_agent: str = "Modus/0.0.0"
-    follow_redirects: bool = False
+    follow_same_origin_redirects: bool = True
+    """Follow 3xx redirects whose Location targets the same scheme +
+    host + port as the original request. Cross-origin redirects are
+    never followed regardless of this flag — a redirect to a
+    different host could land Modus on out-of-scope assets, so we
+    stop and let the caller decide."""
+    max_redirects: int = 5
     verify_tls: bool = True
     extra_default_headers: dict[str, str] = field(default_factory=dict)
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     async def __aenter__(self) -> HttpExecutor:
+        # We always pass ``follow_redirects=False`` to httpx so we can
+        # apply our own same-origin policy — letting httpx auto-follow
+        # would let cross-origin redirects through, which a defensive
+        # offensive-security tool shouldn't do without operator
+        # awareness.
         self._client = httpx.AsyncClient(
             timeout=self.timeout_seconds,
-            follow_redirects=self.follow_redirects,
+            follow_redirects=False,
             verify=self.verify_tls,
             headers={"User-Agent": self.user_agent, **self.extra_default_headers},
         )
@@ -117,22 +136,57 @@ class HttpExecutor:
                 "HttpExecutor must be used inside `async with` before calling execute()."
             )
 
-        url = self._build_url(action)
+        original_url = self._build_url(action)
         request_headers = dict(action.headers)
         observation_id = f"http-{uuid.uuid4()}"
         started = time.monotonic()
+
+        current_url = original_url
+        current_method = action.method
+        request_body: str | None = action.body
+        redirect_chain: list[str] = []
+
         try:
             response = await self._client.request(
-                action.method,
-                url,
+                current_method,
+                current_url,
                 headers=request_headers,
-                content=action.body,
+                content=request_body,
             )
+            for _ in range(self.max_redirects):
+                if not self.follow_same_origin_redirects:
+                    break
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = response.headers.get("location")
+                if not location:
+                    break
+                next_url = urljoin(current_url, location)
+                if not _same_origin(original_url, next_url):
+                    # Cross-origin — do not follow. The caller sees
+                    # the 3xx response and the unfollowed Location
+                    # in the response_headers.
+                    break
+                redirect_chain.append(next_url)
+                # 303 always becomes GET; 301/302 historically did
+                # too for non-GET; 307/308 preserve method+body.
+                if response.status_code == 303 or (
+                    response.status_code in (301, 302) and current_method != "HEAD"
+                ):
+                    current_method = "GET"
+                    request_body = None
+                current_url = next_url
+                response = await self._client.request(
+                    current_method,
+                    current_url,
+                    headers=request_headers,
+                    content=request_body,
+                )
         except httpx.HTTPError as exc:
             elapsed = (time.monotonic() - started) * 1000.0
             return HttpObservation(
                 id=observation_id,
-                url=url,
+                url=current_url,
                 method=action.method,
                 request_headers=request_headers,
                 request_body=action.body,
@@ -141,13 +195,14 @@ class HttpExecutor:
                 response_body="",
                 elapsed_ms=elapsed,
                 error=f"{type(exc).__name__}: {exc}",
+                redirect_chain=tuple(redirect_chain),
             )
 
         elapsed = (time.monotonic() - started) * 1000.0
         body_text = _decode_response_body(response)
         return HttpObservation(
             id=observation_id,
-            url=url,
+            url=current_url,
             method=action.method,
             request_headers=request_headers,
             request_body=action.body,
@@ -155,6 +210,7 @@ class HttpExecutor:
             response_headers=dict(response.headers.items()),
             response_body=body_text,
             elapsed_ms=elapsed,
+            redirect_chain=tuple(redirect_chain),
         )
 
     def _build_url(self, action: Request) -> str:
@@ -166,6 +222,21 @@ class HttpExecutor:
         scheme = "https" if action.tls else "http"
         port_part = f":{action.port}" if action.port is not None else ""
         return f"{scheme}://{action.target}{port_part}{action.path}"
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """Return True iff two URLs share scheme + host + effective port.
+
+    "Effective port" treats missing ports as the scheme default
+    (80 for http, 443 for https), so ``http://x:80`` and ``http://x``
+    are considered the same origin. Cross-scheme is rejected even on
+    the same host (``http`` to ``https`` is a meaningful change).
+    """
+    pa, pb = urlparse(a), urlparse(b)
+    if pa.scheme != pb.scheme or pa.hostname != pb.hostname:
+        return False
+    default = 443 if pa.scheme == "https" else 80
+    return (pa.port or default) == (pb.port or default)
 
 
 def _decode_response_body(response: httpx.Response) -> str:

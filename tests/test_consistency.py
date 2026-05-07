@@ -57,6 +57,54 @@ class TestRequestConsistency:
         )
         assert not verdict.accepted
 
+    def test_endpoint_aware_check_rejects_wrong_port(self) -> None:
+        # When CorpusState.allowed_endpoints constrains port + tls,
+        # Request with a different (port, tls) tuple must be
+        # rejected — even though the hostname IS in scope.
+        from modus.scope import AllowedEndpoint
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"localhost"}),
+            allowed_endpoints=(AllowedEndpoint(host="localhost", port=13000, tls=False),),
+            allowed_methods=frozenset({"GET"}),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="localhost", method="GET", path="/", port=3000, tls=False),
+            state,
+        )
+        assert not verdict.accepted
+        assert any(name.startswith("endpoint_in_scope:") for name in verdict.failed_preconditions)
+
+    def test_endpoint_aware_check_accepts_matching_port(self) -> None:
+        from modus.scope import AllowedEndpoint
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"localhost"}),
+            allowed_endpoints=(AllowedEndpoint(host="localhost", port=13000, tls=False),),
+            allowed_methods=frozenset({"GET"}),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="localhost", method="GET", path="/", port=13000, tls=False),
+            state,
+        )
+        assert verdict.accepted
+
+    def test_endpoint_aware_check_rejects_wrong_tls(self) -> None:
+        from modus.scope import AllowedEndpoint
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"localhost"}),
+            allowed_endpoints=(AllowedEndpoint(host="localhost", port=13000, tls=False),),
+            allowed_methods=frozenset({"GET"}),
+        )
+        # Same host + port, but tls=True doesn't match the http-only
+        # endpoint pattern.
+        verdict = ConsistencyChecker().check(
+            Request(target="localhost", method="GET", path="/", port=13000, tls=True),
+            state,
+        )
+        assert not verdict.accepted
+
 
 class TestCompareConsistency:
     def test_two_known_observations_accepted(self) -> None:

@@ -205,15 +205,22 @@ class ServerSession:
 
         Combines the (immutable) scope-derived sets with the
         session-local observation/Candidate pool so that actions can
-        reference observations the agent itself just produced.
+        reference observations the agent itself just produced. The
+        scope's ``allowed_assets`` entries are parsed into structured
+        endpoint patterns and into a flat set of hostnames; both flow
+        into the corpus state so that hostname-level actions and
+        endpoint-level Request actions each get the right check.
         """
         observation_ids = frozenset(obs.id for obs in self.observations)
+        endpoints = self.scope.endpoints()
+        hosts = self.scope.hosts()
         return CorpusState(
-            in_scope_assets=self.scope.allowed_assets,
+            in_scope_assets=hosts,
+            allowed_endpoints=endpoints,
             allowed_methods=self.scope.allowed_methods,
             known_observations=observation_ids,
             known_evidence=frozenset(),
-            known_referents=self.scope.allowed_assets | observation_ids,
+            known_referents=hosts | observation_ids,
         )
 
     @classmethod
