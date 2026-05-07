@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from modus.consistency import CorpusState
 from modus.corpus import QuarryMcpClient
+from modus.tools import ToolRegistry, build_default_registry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -267,6 +268,11 @@ class ServerSession:
     observations: list[SessionObservation] = field(default_factory=list)
     candidates: list[SessionCandidate] = field(default_factory=list)
     async_sessions: dict[str, AsyncSession] = field(default_factory=dict)
+    tool_registry: ToolRegistry = field(default_factory=lambda: build_default_registry())
+    """Registry of tools the agent may invoke. Populated at session
+    construction with the six typed-action builtins; operators can
+    add shell or MCP-passthrough tools via the scope file's
+    ``tools`` block (loaded by :meth:`from_scope_file`)."""
     """Registry of in-flight (or completed-but-not-collected)
     autonomous-session runs started by ``start_autonomous_session``.
     The poll and cancel tools look sessions up by ID. Lives until
@@ -338,13 +344,26 @@ class ServerSession:
     def from_scope_file(
         cls, scope_path: Path, *, env: dict[str, str] | None = None
     ) -> ServerSession:
-        """Load a scope policy from disk and resolve LLM + Quarry config from env."""
+        """Load a scope policy from disk and resolve LLM + Quarry config from env.
+
+        Tool registry is initialised with Modus's builtin
+        typed-action specs and then extended with any
+        operator-declared tools in the scope file's ``tools``
+        block. Duplicate names (collision with a builtin or with
+        another scope-file entry) raise at load time so config
+        errors surface here, not at dispatch.
+        """
         from modus.scope import ScopePolicy
 
+        scope = ScopePolicy.from_json(scope_path)
+        registry = build_default_registry()
+        for declaration in scope.tools:
+            registry.register(declaration.to_spec())
         return cls(
-            scope=ScopePolicy.from_json(scope_path),
+            scope=scope,
             llm=LlmProviderConfig.from_env(env),
             quarry_launch=QuarryLaunchConfig.from_env(env),
+            tool_registry=registry,
         )
 
 

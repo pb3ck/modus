@@ -21,7 +21,7 @@ ports and only one of them is in scope.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -29,6 +29,8 @@ from modus import __version__
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from modus.tools import ToolSpec
 
 
 #: Default User-Agent sent on outbound HTTP requests when the scope
@@ -129,6 +131,86 @@ def _parse_allowed_asset(spec: str) -> AllowedEndpoint:
     return AllowedEndpoint(host=host, port=port_val, tls=tls)
 
 
+class ShellToolDeclaration(BaseModel):
+    """Operator-declared shell tool entry from the scope file.
+
+    Lossily converts to a :class:`~modus.tools.ToolSpec` at session
+    construction. The ``argv_template`` is the shell command broken
+    into discrete tokens; ``{arg_name}`` placeholders get
+    substituted from the action's ``args`` at dispatch time. No
+    shell parsing happens — tokens go straight to the kernel.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["shell"] = "shell"
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=2048)
+    args_schema: dict[str, Any]
+    side_effect: Literal["read", "write", "active"]
+    argv_template: tuple[str, ...] = Field(min_length=1)
+    cwd: str | None = None
+    env_passthrough: tuple[str, ...] = ()
+    timeout_seconds: float = Field(default=60.0, gt=0.0, le=3600.0)
+
+    def to_spec(self) -> ToolSpec:
+        from modus.tools import ShellInvocation, ToolSpec
+
+        return ToolSpec(
+            name=self.name,
+            kind="shell",
+            description=self.description,
+            args_schema=self.args_schema,
+            side_effect=self.side_effect,
+            invocation=ShellInvocation(
+                argv_template=self.argv_template,
+                cwd=self.cwd,
+                env_passthrough=self.env_passthrough,
+                timeout_seconds=self.timeout_seconds,
+            ),
+        )
+
+
+class McpToolDeclaration(BaseModel):
+    """Operator-declared MCP-passthrough tool from the scope file.
+
+    Routes through the host's MCP infrastructure to a foreign
+    server. Useful for filesystem reads, web fetches, and any
+    other host-side MCP server's surface.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["mcp"] = "mcp"
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=2048)
+    args_schema: dict[str, Any]
+    side_effect: Literal["read", "write", "active"]
+    server_name: str = Field(min_length=1, max_length=128)
+    tool_name: str = Field(min_length=1, max_length=128)
+
+    def to_spec(self) -> ToolSpec:
+        from modus.tools import McpInvocation, ToolSpec
+
+        return ToolSpec(
+            name=self.name,
+            kind="mcp",
+            description=self.description,
+            args_schema=self.args_schema,
+            side_effect=self.side_effect,
+            invocation=McpInvocation(
+                server_name=self.server_name,
+                tool_name=self.tool_name,
+            ),
+        )
+
+
+ToolDeclaration = Annotated[
+    ShellToolDeclaration | McpToolDeclaration,
+    Field(discriminator="kind"),
+]
+
+
 class ScopePolicy(BaseModel):
     """Operator-authored scope envelope for a single Modus session.
 
@@ -161,6 +243,14 @@ class ScopePolicy(BaseModel):
         default_factory=lambda: frozenset({"GET", "HEAD", "OPTIONS"})
     )
     user_agent: str = Field(default=DEFAULT_USER_AGENT, min_length=1, max_length=512)
+    tools: tuple[ToolDeclaration, ...] = ()
+    """Operator-declared tools to register on top of Modus's
+    builtin set. Each entry is a shell or MCP-passthrough
+    declaration; see :class:`ShellToolDeclaration` and
+    :class:`McpToolDeclaration`. The session's
+    :attr:`~modus.session.ServerSession.tool_registry` is built
+    by registering these on top of the default registry of
+    builtins."""
 
     @field_validator("allowed_assets")
     @classmethod
@@ -208,4 +298,11 @@ class ScopePolicy(BaseModel):
         return cls.model_validate_json(path.read_text())
 
 
-__all__ = ["DEFAULT_USER_AGENT", "AllowedEndpoint", "ScopePolicy"]
+__all__ = [
+    "DEFAULT_USER_AGENT",
+    "AllowedEndpoint",
+    "McpToolDeclaration",
+    "ScopePolicy",
+    "ShellToolDeclaration",
+    "ToolDeclaration",
+]
