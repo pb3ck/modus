@@ -222,6 +222,30 @@ class TestRequestTool:
         assert result["result"]["status"] == 200
         assert len(session.observations) == 1
 
+    async def test_plaintext_http_with_port_targets_correct_url(self) -> None:
+        seen_urls: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_urls.append(str(request.url))
+            return httpx.Response(200, text="ok")
+
+        server, _session = _server_with(
+            quarry=_FixedCorpusClient(),
+            transport=httpx.MockTransport(handler),
+        )
+        result = await server._dispatch(
+            "request",
+            {
+                "target": "target.example.com",
+                "method": "GET",
+                "path": "/api",
+                "port": 13000,
+                "tls": False,
+            },
+        )
+        assert result["verdict"]["accepted"] is True
+        assert seen_urls == ["http://target.example.com:13000/api"]
+
     async def test_user_agent_comes_from_scope_policy(self) -> None:
         seen_user_agent: list[str] = []
 

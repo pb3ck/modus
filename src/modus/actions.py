@@ -75,6 +75,12 @@ class Request(_ActionBase):
     the operator-approved set for the session; the consistency
     layer enforces this.
 
+    The default transport is HTTPS on the standard port. For
+    local labs / non-standard ports, set ``port`` and/or
+    ``tls=False``: ``Request(target='localhost', port=13000,
+    tls=False, method='GET', path='/')`` produces
+    ``http://localhost:13000/``.
+
     Preconditions:
       * ``target`` is in scope.
       * ``method`` is in the session's allowed-methods set.
@@ -86,6 +92,8 @@ class Request(_ActionBase):
     path: str = Field(min_length=1, max_length=4096)
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    tls: bool = True
 
     @field_validator("path")
     @classmethod

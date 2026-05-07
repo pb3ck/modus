@@ -159,11 +159,13 @@ class HttpExecutor:
 
     def _build_url(self, action: Request) -> str:
         # ``action.target`` is a hostname; ``action.path`` always
-        # starts with ``/`` (validated by the Pydantic model). We
-        # default to HTTPS — operators who genuinely need plaintext
-        # HTTP can include the protocol in the target via a future
-        # action-grammar extension; v0.1 is HTTPS-only.
-        return f"https://{action.target}{action.path}"
+        # starts with ``/`` (validated by the Pydantic model). The
+        # scheme and port come from the action — defaults are
+        # ``https`` and the standard port (443/80), with non-default
+        # values reserved for local labs and unusual setups.
+        scheme = "https" if action.tls else "http"
+        port_part = f":{action.port}" if action.port is not None else ""
+        return f"{scheme}://{action.target}{port_part}{action.path}"
 
 
 def _decode_response_body(response: httpx.Response) -> str:

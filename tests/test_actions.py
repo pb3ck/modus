@@ -46,6 +46,22 @@ class TestRequest:
         with pytest.raises(ValidationError):
             Request(target="example.com", method="FOO", path="/")  # type: ignore[arg-type]
 
+    def test_port_and_tls_defaults(self) -> None:
+        action = Request(target="example.com", method="GET", path="/")
+        assert action.port is None
+        assert action.tls is True
+
+    def test_port_must_be_in_valid_range(self) -> None:
+        with pytest.raises(ValidationError):
+            Request(target="example.com", method="GET", path="/", port=0)
+        with pytest.raises(ValidationError):
+            Request(target="example.com", method="GET", path="/", port=70000)
+
+    def test_plaintext_http_with_port(self) -> None:
+        action = Request(target="localhost", method="GET", path="/", port=13000, tls=False)
+        assert action.port == 13000
+        assert action.tls is False
+
 
 class TestCompare:
     def test_minimal_valid(self) -> None:
