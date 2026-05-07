@@ -19,17 +19,6 @@ You should have received a copy of the GNU Affero General Public
 License along with this program. If not, see
 <https://www.gnu.org/licenses/>.
 
-----------------------------------------------------------------------
-
-The full text of the AGPL-3.0 license should be included in this file.
-To populate it, run from the repository root:
-
-    curl -L https://www.gnu.org/licenses/agpl-3.0.txt -o LICENSE.full
-    cat LICENSE.full >> LICENSE
-    rm LICENSE.full
-
-This is a temporary placeholder — the full canonical license text
-must be present in this file before the first public release.
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
