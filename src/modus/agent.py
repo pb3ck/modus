@@ -158,7 +158,9 @@ class AgentLoop:
                 break
 
             step_started = _utcnow()
-            context = self._step_context(objective_text, history=history)
+            context = self._step_context(
+                objective_text, history=history, bug_classes=tuple(bug_classes)
+            )
 
             # 1. Propose
             proposals = await self.proposer.propose(context)
@@ -246,11 +248,18 @@ class AgentLoop:
                 keys.add(_action_dedup_key(action))
         return keys
 
-    def _step_context(self, objective: str, *, history: list[str]) -> StepContext:
+    def _step_context(
+        self,
+        objective: str,
+        *,
+        history: list[str],
+        bug_classes: tuple[str, ...] = (),
+    ) -> StepContext:
         return StepContext(
             corpus_state=self.session.corpus_state(),
             scope=self.session.scope,
             objective=objective,
+            bug_classes=bug_classes,
             recent_history=tuple(history[-self.HISTORY_TAIL :]),
             sample_count=8,
         )
@@ -313,6 +322,12 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
     target = getattr(action, "target", None) or getattr(action, "referent", None)
     if target:
         parts.append(f"target={target}")
+    # Surface the observation_id in history so the proposer can cite it
+    # in `evidence_refs` when it emits a `hypothesize` action. Without
+    # this, the model has nothing to reference and can't close the loop.
+    obs_id = result.get("observation_id") or result.get("id")
+    if isinstance(obs_id, str) and obs_id:
+        parts.append(f"obs={obs_id}")
     if action.kind == "request":
         method = getattr(action, "method", None)
         path = getattr(action, "path", None)
@@ -330,6 +345,13 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
         body = result.get("response_body")
         if isinstance(body, str):
             parts.append(f"body_len={len(body)}")
+            # Tail excerpt of the response body so the proposer can spot
+            # win signals (auth tokens, error messages, version strings)
+            # without us shipping kilobyte payloads back into the prompt.
+            # 240 chars is plenty for a JWT prefix or a pithy 401 body.
+            excerpt = body.replace("\n", " ").replace("\r", " ").strip()[:240]
+            if excerpt:
+                parts.append(f"body_excerpt={excerpt!r}")
     elif action.kind == "probe":
         aspect = getattr(action, "aspect", None)
         parts.append(f"aspect={aspect}")

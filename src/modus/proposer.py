@@ -65,6 +65,7 @@ class StepContext:
     corpus_state: CorpusState
     scope: ScopePolicy
     objective: str = ""
+    bug_classes: tuple[str, ...] = field(default_factory=tuple)
     retrieval: tuple[str, ...] = field(default_factory=tuple)
     recent_history: tuple[str, ...] = field(default_factory=tuple)
     sample_count: int = 8
@@ -291,12 +292,38 @@ class _LlmProposerBase:
             if context.recent_history
             else ""
         )
+        closing_block = ""
+        if context.bug_classes:
+            classes = ", ".join(context.bug_classes)
+            closing_block = (
+                "# Closing rule (read this every step)\n\n"
+                f"You are testing for: {classes}. If the recent action history "
+                "contains observations that EVIDENCE one of these bug classes, "
+                "your NEXT action MUST be a `hypothesize` action — do NOT propose "
+                "more `request` or `probe` actions. Reference the relevant "
+                "observation IDs (the `obs=...` values shown in history) in the "
+                "`evidence_refs` list. Concrete examples of evidence:\n"
+                "- auth_bypass: a `request` with a SQL-injection-shaped or "
+                "auth-bypass-shaped input that returns HTTP 200 with an auth "
+                "token (JWT, session cookie) when a baseline request with the "
+                "same endpoint and benign input returned 401/403.\n"
+                "- idor: two `request` observations to the same path-shaped "
+                "URL with different identifiers where the response bodies show "
+                "data belonging to a different user/tenant.\n"
+                "- info_disclosure: a `request` returning HTTP 200 with a "
+                "body containing secrets, keys, version metadata, source "
+                "files, or directory listings the application shouldn't "
+                "expose.\n"
+                "When evidence is present, close the loop. The operator "
+                "decides whether to promote the Candidate to a Finding.\n\n"
+            )
         return (
             f"{objective_block}"
             "# Current corpus state\n\n"
             f"{_render_corpus_state(context.corpus_state)}\n"
             f"{retrieval_block}"
             f"{history_block}"
+            f"{closing_block}"
             f"# Your task\n\n"
             f"Propose up to {context.sample_count} candidate actions. "
             f"{_OUTPUT_INSTRUCTIONS}"
