@@ -22,11 +22,19 @@ roughly grouped as follows:
   — the foundational architectural decision: actions are typed
   rather than free-form.
 - [`adr/0002-autonomous-loop-and-verifier-driven-search.md`](./adr/0002-autonomous-loop-and-verifier-driven-search.md)
-  — the loop shape: autonomous, verifier-driven N-sampling with
-  SMT pruning, prompt-cache-aware context engineering.
+  — the autonomous loop's shape: verifier-driven N-sampling
+  with SMT pruning, prompt-cache-aware context engineering.
+  Extended by ADR-0003.
+- [`adr/0003-host-driven-loop-mcp-server-boundary.md`](./adr/0003-host-driven-loop-mcp-server-boundary.md)
+  — Modus is an autonomous agent exposed as an MCP server.
+  Both autonomous-session tools and verified-action tools are
+  always present.
 - [`corpus-interface.md`](./corpus-interface.md) — the contract
   Modus places on its corpus substrate, pinned to Quarry's MCP
   surface.
+- [`mcp-host-integration.md`](./mcp-host-integration.md) —
+  operator-facing setup for Claude Desktop, Claude Code, and
+  other MCP-aware hosts.
 
 ## Planned documents
 
@@ -41,8 +49,6 @@ roadmap and will be written as the corresponding code lands:
   type.
 - `proposer.md` — the verifier-driven sampling loop in detail:
   prompt zones, sample budget, pruning, value heuristics.
-- `quickstart.md` — operator-facing install and first-run guide,
-  including how to point Modus at an existing Quarry corpus.
 - `methodology.md` — how Modus expects to fit into a real bounty
   workflow, including the operator's review loop after a session
   ends.

@@ -62,6 +62,27 @@ notice.
   drive a real `quarry mcp` subprocess against a tmpdir corpus.
   Skipped by default; documented in `CONTRIBUTING.md`.
 
+### Architecture
+
+- **Modus is delivered as an MCP server.** The agent's
+  autonomous loop runs end-to-end inside Modus when the host
+  invokes its autonomous-session tool; Modus also exposes a
+  per-action verified-tool surface for hosts/operators who want
+  to drive each step explicitly. Both surfaces are always
+  present in the MCP tool list. The operator drives Modus from
+  any MCP-aware host (Claude Desktop primarily). README and
+  ROADMAP rewritten around this shape.
+- ADR-0003
+  ([`docs/adr/0003-host-driven-loop-mcp-server-boundary.md`](./docs/adr/0003-host-driven-loop-mcp-server-boundary.md))
+  documents the new architecture. ADR-0002 is extended (not
+  superseded) — the autonomous loop's internals
+  (N-sampling, Z3 pruning, ranking, budget-bounded execution,
+  cache-zone discipline) still apply; what changes is that the
+  loop runs inside an MCP tool handler rather than a CLI.
+- New `docs/mcp-host-integration.md` covers operator-facing
+  setup for Claude Desktop, Claude Code, and other MCP-aware
+  hosts.
+
 ### Changed
 
 - `README.md` and `ROADMAP.md` rewritten around the autonomous

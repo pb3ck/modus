@@ -30,9 +30,13 @@ Every ADR has the following sections:
   — actions are drawn from a typed grammar and validated by an
   SMT solver before dispatch.
 - [`0002-autonomous-loop-and-verifier-driven-search.md`](./0002-autonomous-loop-and-verifier-driven-search.md)
-  — Modus is an autonomous loop; the proposer samples N actions
-  per step, the SMT layer prunes the inconsistent ones, and the
-  prompt is structured for cache friendliness.
+  — the autonomous loop's shape: N-sampling with SMT pruning,
+  prompt-cache-aware context. Extended by ADR-0003 (the loop
+  now runs inside an MCP tool handler).
+- [`0003-host-driven-loop-mcp-server-boundary.md`](./0003-host-driven-loop-mcp-server-boundary.md)
+  — Modus is an autonomous agent exposed as an MCP server. The
+  autonomous-session tools and verified-action tools are both
+  always present. Extends ADR-0002.
 
 ## When to write an ADR
 

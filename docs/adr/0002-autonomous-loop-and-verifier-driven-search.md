@@ -5,6 +5,11 @@
 - **Supersedes:** —
 - **Superseded by:** —
 - **Extends:** [`0001-typed-action-vocabulary.md`](./0001-typed-action-vocabulary.md)
+- **Extended by:** [`0003-host-driven-loop-mcp-server-boundary.md`](./0003-host-driven-loop-mcp-server-boundary.md)
+  — the loop described here runs inside an MCP tool handler
+  rather than as a standalone CLI loop. The loop's internals
+  (N-sampling, Z3 pruning, ranking, budget-bounded execution,
+  cache-zone discipline) are unchanged.
 
 ## Context
 
