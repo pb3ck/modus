@@ -339,6 +339,15 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
         scheme = "https" if tls else "http"
         port_part = f":{port}" if port is not None else ""
         parts.append(f"{method} {scheme}://{target}{port_part}{path}")
+        # Carry the request body excerpt too. Without it the proposer
+        # sees "POST /login → 200 with JWT" but not what was POSTed —
+        # it can't tell a successful SQLi from a successful normal
+        # login, and won't recognise the bug-class evidence pattern.
+        # Trimmed to 240 chars to match the response excerpt budget.
+        req_body = getattr(action, "body", None)
+        if isinstance(req_body, str) and req_body.strip():
+            req_excerpt = req_body.replace("\n", " ").replace("\r", " ").strip()[:240]
+            parts.append(f"req_body={req_excerpt!r}")
         status = result.get("status")
         if status is not None:
             parts.append(f"status={status}")
