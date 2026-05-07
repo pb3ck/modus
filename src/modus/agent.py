@@ -146,6 +146,11 @@ class AgentLoop:
         objective_text = objective or self._default_objective(target_name, bug_classes)
         empty_streak = 0
         wall_started = time.monotonic()
+        # Cumulative one-line summaries of executed actions and their
+        # results, fed back to the proposer each step so it doesn't
+        # re-propose actions that already ran. Capped at the most
+        # recent ``HISTORY_TAIL`` entries to keep the prompt bounded.
+        history: list[str] = []
 
         for step_index in range(self.budget.max_steps):
             if (time.monotonic() - wall_started) > self.budget.max_wall_seconds:
@@ -153,7 +158,7 @@ class AgentLoop:
                 break
 
             step_started = _utcnow()
-            context = self._step_context(objective_text)
+            context = self._step_context(objective_text, history=history)
 
             # 1. Propose
             proposals = await self.proposer.propose(context)
@@ -175,8 +180,10 @@ class AgentLoop:
                     result = {"error": f"executor raised: {exc}"}
                 executed.append(action)
                 execution_results.append(result)
+                history.append(_summarise_step(step_index, action, result))
                 empty_streak = 0
             else:
+                history.append(f"step {step_index}: all {len(proposals)} proposals rejected by Z3")
                 empty_streak += 1
 
             step_record = StepRecord(
@@ -199,11 +206,14 @@ class AgentLoop:
         record.finished_at = _utcnow()
         return record
 
-    def _step_context(self, objective: str) -> StepContext:
+    HISTORY_TAIL = 12  # how many recent steps to feed back to the proposer
+
+    def _step_context(self, objective: str, *, history: list[str]) -> StepContext:
         return StepContext(
             corpus_state=self.session.corpus_state(),
             scope=self.session.scope,
             objective=objective,
+            recent_history=tuple(history[-self.HISTORY_TAIL :]),
             sample_count=8,
         )
 
@@ -220,6 +230,46 @@ class AgentLoop:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> str:
+    """One-line history entry the proposer sees on the next step.
+
+    Compact by design — the proposer doesn't need the full payload,
+    just enough to know "I already tried X and it returned Y" so
+    next-step proposals don't duplicate work. Long fields (response
+    bodies, search hit lists) are summarised to a count or a length.
+    """
+    base = f"step {step_index}: {action.kind}"
+    parts: list[str] = []
+    # Action-specific identity fields the proposer cares about.
+    target = getattr(action, "target", None) or getattr(action, "referent", None)
+    if target:
+        parts.append(f"target={target}")
+    if action.kind == "request":
+        method = getattr(action, "method", None)
+        path = getattr(action, "path", None)
+        parts.append(f"{method} {path}")
+        status = result.get("status")
+        if status is not None:
+            parts.append(f"status={status}")
+        body = result.get("response_body")
+        if isinstance(body, str):
+            parts.append(f"body_len={len(body)}")
+    elif action.kind == "probe":
+        aspect = getattr(action, "aspect", None)
+        parts.append(f"aspect={aspect}")
+        hits = result.get("hits")
+        assets = result.get("assets")
+        if hits is not None:
+            parts.append(f"hits={len(hits) if isinstance(hits, list) else hits}")
+        if assets is not None:
+            parts.append(f"assets={len(assets) if isinstance(assets, list) else assets}")
+    elif action.kind == "hypothesize":
+        parts.append(f"bug_class={getattr(action, 'bug_class', '?')}")
+    if "error" in result:
+        parts.append(f"error={str(result['error'])[:120]}")
+    return base + (" " + " ".join(parts) if parts else "")
 
 
 __all__ = ["AgentLoop", "Budget", "SessionRecord", "StepRecord"]
