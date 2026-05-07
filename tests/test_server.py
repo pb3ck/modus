@@ -124,7 +124,16 @@ def _server_with(
 ) -> tuple[ModusServer, ServerSession]:
     session = ServerSession(scope=_scope(), llm=llm)
     if quarry is not None:
-        session._quarry = quarry
+        # Override the per-call context manager to yield the fake.
+        from contextlib import asynccontextmanager
+
+        injected = quarry
+
+        @asynccontextmanager
+        async def _yield_fake():  # type: ignore[no-untyped-def]
+            yield injected
+
+        session.with_quarry = _yield_fake  # type: ignore[method-assign]
     executor = HttpExecutor()
     if transport is not None:
         executor._client = httpx.AsyncClient(transport=transport)

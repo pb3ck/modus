@@ -102,6 +102,15 @@ class _FakeSession:
     ) -> CallToolResult:
         self.calls.append((name, dict(arguments or {})))
         if self.call_delay_seconds:
+            # Mimic the MCP SDK's per-call timeout: if our delay exceeds
+            # the requested ``read_timeout_seconds``, raise TimeoutError
+            # the way the SDK does.
+            if (
+                read_timeout_seconds is not None
+                and self.call_delay_seconds > read_timeout_seconds.total_seconds()
+            ):
+                await asyncio.sleep(read_timeout_seconds.total_seconds())
+                raise TimeoutError("fake call_tool exceeded read_timeout_seconds")
             await asyncio.sleep(self.call_delay_seconds)
         if name not in self.responses:
             raise KeyError(f"fake session has no response for {name!r}")
@@ -176,15 +185,34 @@ class TestLifecycle:
         assert original["A"] == "1"
 
     async def test_aenter_verifies_required_tools(self) -> None:
-        # Drop one required tool to provoke the schema check
-        partial = [tool for tool in _all_required_tools() if tool.name != "analyze_regression"]
+        # Dropping a *required* tool fails verification.
+        partial = [tool for tool in _all_required_tools() if tool.name != "search"]
         session = _FakeSession(tools=partial)
         client = QuarryMcpClient.from_session(session)
-        # Force the verification pathway by calling _verify_tools directly;
-        # __aenter__'s subprocess pathway is exercised only by integration tests.
         with pytest.raises(CorpusToolsMissingError) as info:
             await client._verify_tools()
-        assert "analyze_regression" in info.value.missing
+        assert "search" in info.value.missing
+
+    async def test_optional_tool_absence_does_not_fail_verification(self) -> None:
+        # Dropping an *optional* tool (e.g. coverage) doesn't fail
+        # verification — the connection stays up; per-call methods
+        # surface the absence on demand.
+        partial = [tool for tool in _all_required_tools() if tool.name != "coverage"]
+        session = _FakeSession(tools=partial)
+        client = QuarryMcpClient.from_session(session)
+        # Force-set _available_tools the way real verification would.
+        await client._verify_tools()
+        assert "coverage" not in client._available_tools
+
+    async def test_call_to_missing_optional_tool_raises_per_call(self) -> None:
+        # Once we know the optional tool is absent, a per-call
+        # invocation surfaces CorpusToolsMissingError.
+        partial = [tool for tool in _all_required_tools() if tool.name != "coverage"]
+        session = _FakeSession(tools=partial)
+        client = QuarryMcpClient.from_session(session)
+        await client._verify_tools()
+        with pytest.raises(CorpusToolsMissingError):
+            await client.coverage()
 
 
 class TestStatus:

@@ -23,7 +23,6 @@ Quarry's own README (the analytical tools, ``list_assets``,
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -273,11 +272,26 @@ class QuarryMcpClient:
 
     REQUIRED_TOOLS: ClassVar[frozenset[str]] = frozenset(
         {
+            # Hard-required: the verified-action surface and the
+            # autonomous loop's information-gathering both depend on
+            # these. If any is missing, Modus refuses to connect
+            # rather than half-work in a confusing way.
             "status",
             "list_targets",
             "search",
             "list_assets",
             "diff",
+        }
+    )
+
+    OPTIONAL_TOOLS: ClassVar[frozenset[str]] = frozenset(
+        {
+            # Best-effort: Modus connects even if these are missing.
+            # Quarry's README flags the analytical surface as in-flux,
+            # so we don't fail the whole session over an absent
+            # ``coverage`` or ``analyze_*``. Calls to a missing
+            # optional tool surface :class:`CorpusToolsMissingError`
+            # at the call site — strictly per-call, not per-session.
             "coverage",
             "recall",
             "analyze_regression",
@@ -308,6 +322,10 @@ class QuarryMcpClient:
         self._session: _SessionProtocol | None = None
         self._stack: AsyncExitStack | None = None
         self._owns_session = True
+        # Populated by :meth:`_verify_tools` once the connection's
+        # tool list is known; default to "all required tools available"
+        # for ``from_session``-injected fakes that bypass verification.
+        self._available_tools: frozenset[str] = self.REQUIRED_TOOLS | self.OPTIONAL_TOOLS
 
     @classmethod
     def from_session(
@@ -330,6 +348,7 @@ class QuarryMcpClient:
         instance._session = session
         instance._stack = None
         instance._owns_session = False
+        instance._available_tools = cls.REQUIRED_TOOLS | cls.OPTIONAL_TOOLS
         return instance
 
     async def __aenter__(self) -> QuarryMcpClient:
@@ -405,9 +424,20 @@ class QuarryMcpClient:
                 f"Quarry MCP server did not respond to list_tools: {exc}"
             ) from exc
         available = {tool.name for tool in response.tools}
-        missing = self.REQUIRED_TOOLS - available
-        if missing:
-            raise CorpusToolsMissingError(missing=missing, available=available)
+        missing_required = self.REQUIRED_TOOLS - available
+        if missing_required:
+            raise CorpusToolsMissingError(missing=missing_required, available=available)
+        # Stash what's actually exposed so per-call methods can fail
+        # gracefully when an optional tool is absent.
+        self._available_tools = frozenset(available)
+        absent_optional = self.OPTIONAL_TOOLS - available
+        if absent_optional:
+            _LOG.info(
+                "Quarry MCP server is missing optional tool(s): %s. "
+                "Calls to those tools will return CorpusToolsMissingError; "
+                "the rest of the corpus surface is unaffected.",
+                sorted(absent_optional),
+            )
 
     async def _call(self, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._session is None:
@@ -415,14 +445,18 @@ class QuarryMcpClient:
                 "QuarryMcpClient must be used inside `async with` (or constructed "
                 "via from_session) before calling tools."
             )
+        if tool in self.OPTIONAL_TOOLS and tool not in self._available_tools:
+            raise CorpusToolsMissingError(missing={tool}, available=self._available_tools)
+        # Rely on the MCP SDK's own ``read_timeout_seconds`` — wrapping
+        # in :func:`asyncio.wait_for` here cancels the SDK's task group
+        # mid-flight on timeout, which closes the underlying stdio
+        # connection and surfaces as ``McpError("Connection closed")``
+        # on subsequent calls. The SDK's timeout returns cleanly.
         try:
-            result = await asyncio.wait_for(
-                self._session.call_tool(
-                    tool,
-                    arguments or {},
-                    read_timeout_seconds=timedelta(seconds=self._call_timeout),
-                ),
-                timeout=self._call_timeout,
+            result = await self._session.call_tool(
+                tool,
+                arguments or {},
+                read_timeout_seconds=timedelta(seconds=self._call_timeout),
             )
         except TimeoutError as exc:
             raise CorpusTimeoutError(tool=tool, timeout_seconds=self._call_timeout) from exc

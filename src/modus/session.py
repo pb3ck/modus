@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -23,7 +24,7 @@ from modus.consistency import CorpusState
 from modus.corpus import QuarryMcpClient
 
 if TYPE_CHECKING:
-    from contextlib import AsyncExitStack
+    from collections.abc import AsyncIterator
     from pathlib import Path
     from types import TracebackType
     from typing import Any
@@ -145,8 +146,6 @@ class ServerSession:
     scope: ScopePolicy
     llm: LlmProviderConfig | None
     quarry_launch: QuarryLaunchConfig = field(default_factory=QuarryLaunchConfig.from_env)
-    _quarry: QuarryMcpClient | None = field(default=None, init=False, repr=False)
-    _quarry_stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
     observations: list[SessionObservation] = field(default_factory=list)
     candidates: list[SessionCandidate] = field(default_factory=list)
 
@@ -159,35 +158,31 @@ class ServerSession:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._quarry_stack is not None:
-            await self._quarry_stack.aclose()
-            self._quarry_stack = None
-            self._quarry = None
+        # Per-call Quarry clients clean themselves up; nothing to do.
+        pass
 
-    async def quarry(self) -> QuarryMcpClient:
-        """Lazily open and cache the Quarry MCP client.
+    @asynccontextmanager
+    async def with_quarry(self) -> AsyncIterator[QuarryMcpClient]:
+        """Open a Quarry MCP client for the duration of one tool call.
 
-        Tool calls that need Quarry call this. The first call pays
-        the subprocess-start cost; subsequent calls reuse the same
-        connection.
+        Each Modus tool handler that needs Quarry opens its own
+        connection: ``async with session.with_quarry() as quarry:``.
+        The MCP SDK's ``stdio_client`` and ``ClientSession`` use anyio
+        task groups that must be entered and exited in the same async
+        scope; sharing one client across multiple request handlers in
+        the outer MCP server runs into anyio's "task group is
+        reentrant only within its own scope" constraint and surfaces
+        as a ``Connection closed`` error on the first cross-scope
+        call. Opening per-call sidesteps that — we pay the
+        subprocess-start cost on each invocation in exchange for
+        correctness.
         """
-        if self._quarry is not None:
-            return self._quarry
-        from contextlib import AsyncExitStack
-
-        stack = AsyncExitStack()
         client = QuarryMcpClient(
             command=self.quarry_launch.command,
             args=self.quarry_launch.args,
         )
-        try:
-            await stack.enter_async_context(client)
-        except Exception:
-            await stack.aclose()
-            raise
-        self._quarry_stack = stack
-        self._quarry = client
-        return client
+        async with client as opened:
+            yield opened
 
     def corpus_state(self) -> CorpusState:
         """Build the :class:`CorpusState` slice for the consistency check.

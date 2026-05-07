@@ -50,7 +50,7 @@ from modus.actions import (
     Request,
 )
 from modus.consistency import ConsistencyChecker, Verdict
-from modus.corpus import CorpusError
+from modus.corpus import CorpusClient, CorpusError
 from modus.executor import HttpExecutor
 from modus.session import ServerSession, SessionCandidate, SessionObservation
 
@@ -414,25 +414,25 @@ class ModusServer:
         raise TypeError(f"unhandled action type: {type(action).__name__}")
 
     async def _execute_probe(self, action: Probe) -> dict[str, Any]:
-        quarry = await self.session.quarry()
-        if action.aspect == "httpx":
+        async with self.session.with_quarry() as quarry:
+            if action.aspect == "httpx":
+                assets = await quarry.list_assets(filters={"name_pattern": action.target})
+                return {"aspect": action.aspect, "assets": assets}
+            if action.aspect == "endpoints":
+                hits = await quarry.search(
+                    query=action.target, target=self.session.scope.target_name, limit=20
+                )
+                return {"aspect": action.aspect, "hits": [h.snippet for h in hits]}
+            if action.aspect == "jsbundle":
+                hits = await quarry.search(
+                    query=f"{action.target} jsbundle",
+                    target=self.session.scope.target_name,
+                    limit=10,
+                )
+                return {"aspect": action.aspect, "hits": [h.snippet for h in hits]}
+            # action.aspect == "tech"
             assets = await quarry.list_assets(filters={"name_pattern": action.target})
             return {"aspect": action.aspect, "assets": assets}
-        if action.aspect == "endpoints":
-            hits = await quarry.search(
-                query=action.target, target=self.session.scope.target_name, limit=20
-            )
-            return {"aspect": action.aspect, "hits": [h.snippet for h in hits]}
-        if action.aspect == "jsbundle":
-            hits = await quarry.search(
-                query=f"{action.target} jsbundle",
-                target=self.session.scope.target_name,
-                limit=10,
-            )
-            return {"aspect": action.aspect, "hits": [h.snippet for h in hits]}
-        # action.aspect == "tech"
-        assets = await quarry.list_assets(filters={"name_pattern": action.target})
-        return {"aspect": action.aspect, "assets": assets}
 
     def _execute_compare(self, action: Compare) -> dict[str, Any]:
         a = next((o for o in self.session.observations if o.id == action.observation_a), None)
@@ -461,10 +461,14 @@ class ModusServer:
 
     async def _handle_quarry_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
-            quarry = await self.session.quarry()
+            async with self.session.with_quarry() as quarry:
+                return await self._dispatch_quarry_tool(quarry, name, arguments)
         except CorpusError as exc:
-            return {"error": f"corpus unavailable: {exc}"}
+            return {"error": f"corpus error: {exc}"}
 
+    async def _dispatch_quarry_tool(
+        self, quarry: CorpusClient, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         try:
             if name == "corpus_status":
                 status = await quarry.status()
