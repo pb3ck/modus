@@ -13,6 +13,7 @@ from modus.actions import (
     Hypothesize,
     Probe,
     Request,
+    Tool,
 )
 
 ACTION_ADAPTER: TypeAdapter[Action] = TypeAdapter(Action)
@@ -145,6 +146,73 @@ class TestHypothesize:
                 evidence_refs=("obs-1",),
                 rationale="",
             )
+
+
+class TestTool:
+    def test_minimal_valid(self) -> None:
+        action = Tool(name="amass.enum", args={"domain": "example.com"})
+        assert action.kind == "tool"
+        assert action.name == "amass.enum"
+        assert action.args == {"domain": "example.com"}
+
+    def test_default_args_is_empty_dict(self) -> None:
+        action = Tool(name="corpus.status")
+        assert action.args == {}
+
+    def test_args_is_arbitrary_json(self) -> None:
+        # Free-form by design — each tool's ToolSpec validates the
+        # specific shape via JSON Schema in the consistency layer.
+        # The grammar layer is permissive.
+        action = Tool(
+            name="nuclei.scan",
+            args={
+                "url": "http://target.example.com",
+                "templates": ["cves/2021/CVE-2021-44228.yaml"],
+                "rate_limit": 10,
+                "headers": {"X-Test": "true"},
+            },
+        )
+        assert action.args["templates"][0].endswith(".yaml")
+
+    def test_name_required_non_empty(self) -> None:
+        with pytest.raises(ValidationError):
+            Tool(name="", args={})
+
+    def test_name_must_be_lowercase(self) -> None:
+        # Uppercase / mixed-case names are rejected so the
+        # registry's lookup table can be case-canonical and the
+        # rendered prompt doesn't have ambiguous capitalisation.
+        with pytest.raises(ValidationError):
+            Tool(name="Amass.Enum", args={})
+
+    def test_name_rejects_shell_metachars(self) -> None:
+        # The pattern stops shell-metachar smuggling — registry
+        # names must be plain identifiers, no semicolons / pipes /
+        # backticks / spaces / glob characters.
+        for bad in ("amass enum", "amass;rm", "amass|cat", "amass`id`", "../etc/passwd"):
+            with pytest.raises(ValidationError):
+                Tool(name=bad, args={})
+
+    def test_name_must_start_with_letter(self) -> None:
+        for bad in ("123amass", ".amass", "_amass", "-amass"):
+            with pytest.raises(ValidationError):
+                Tool(name=bad, args={})
+
+    def test_name_max_length(self) -> None:
+        with pytest.raises(ValidationError):
+            Tool(name="a" + "b" * 200, args={})
+
+    def test_round_trip_through_discriminator(self) -> None:
+        original = Tool(name="amass.enum", args={"domain": "example.com"})
+        dumped = original.model_dump_json()
+        restored = ACTION_ADAPTER.validate_json(dumped)
+        assert isinstance(restored, Tool)
+        assert restored == original
+
+    def test_frozen(self) -> None:
+        action = Tool(name="amass.enum", args={"domain": "example.com"})
+        with pytest.raises(ValidationError):
+            action.name = "other"  # type: ignore[misc]
 
 
 class TestDiscriminatedUnion:

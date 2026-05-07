@@ -20,7 +20,8 @@ truth.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import re
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -166,6 +167,58 @@ class Annotate(_ActionBase):
     note: str = Field(min_length=1, max_length=8192)
 
 
+_TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
+
+
+class Tool(_ActionBase):
+    """Invoke a registered tool by name with structured arguments.
+
+    The agent's open-ended dispatch primitive. Where the typed-action
+    variants (:class:`Probe`, :class:`Request`, ...) hard-code one
+    specific operation per class, ``Tool`` lets the proposer reach
+    anything the operator has registered: shell tools (``amass``,
+    ``nuclei``, ``ffuf``), MCP-passthrough tools exposed by the host,
+    or built-in fast-paths registered as the same registry's first-
+    party entries. The registry is the trust boundary; the
+    consistency layer dispatches preconditions by ``name`` lookup.
+
+    Preconditions (evaluated by the consistency layer in v0.3+ via
+    ``ToolSpec.preconditions`` from the registry):
+      * ``name`` is registered.
+      * Per-tool args satisfy that tool's declared scope constraints.
+
+    This action is the structural step that makes Modus an
+    open-vocabulary agent rather than a closed-grammar one. ADR-0004
+    documents the pivot.
+    """
+
+    kind: Literal["tool"] = "tool"
+    name: str = Field(min_length=1, max_length=128)
+    """Registry name. Lowercase identifier, optionally
+    ``.``-namespaced (``amass.enum``, ``nuclei.scan``,
+    ``corpus.search``). Validated against
+    ``^[a-z][a-z0-9_.-]*$`` so registry lookups never collide
+    with shell metacharacters or path separators."""
+    args: dict[str, Any] = Field(default_factory=dict)
+    """Free-form structured arguments. Each tool's ``ToolSpec``
+    declares its own JSON Schema; the consistency layer validates
+    ``args`` against that schema and runs the tool's
+    preconditions function. This field is permissive at the
+    grammar level by design — closing it would re-introduce the
+    closed-vocabulary problem this primitive was built to solve."""
+
+    @field_validator("name")
+    @classmethod
+    def _name_lowercase_dotted(cls, value: str) -> str:
+        if not _TOOL_NAME_PATTERN.fullmatch(value):
+            raise ValueError(
+                "tool name must match ^[a-z][a-z0-9_.-]*$ — "
+                "lowercase, starts with a letter, may contain "
+                "digits, dots, underscores, hyphens"
+            )
+        return value
+
+
 class Hypothesize(_ActionBase):
     """Propose a Candidate of a given bug class.
 
@@ -191,7 +244,7 @@ class Hypothesize(_ActionBase):
 # adding a new action type means adding it to this union and
 # extending :mod:`modus.consistency`.
 Action = Annotated[
-    Probe | Request | Compare | Differential | Annotate | Hypothesize,
+    Probe | Request | Compare | Differential | Annotate | Hypothesize | Tool,
     Field(discriminator="kind"),
 ]
 
@@ -206,4 +259,5 @@ __all__ = [
     "Hypothesize",
     "Probe",
     "Request",
+    "Tool",
 ]

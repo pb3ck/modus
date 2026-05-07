@@ -36,6 +36,7 @@ from modus.actions import (
     Hypothesize,
     Probe,
     Request,
+    Tool,
 )
 
 if TYPE_CHECKING:
@@ -262,6 +263,17 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
             )
             for ref in action.evidence_refs
         ]
+
+    if isinstance(action, Tool):
+        # Placeholder: the registry-driven per-tool preconditions
+        # land in #9. Until then, ``Tool`` actions are gated only
+        # on a single placeholder precondition that's always False
+        # — the action validates via Pydantic but the consistency
+        # layer rejects every Tool emission so the agent loop can't
+        # accidentally execute one before #8/#9 are wired. This
+        # ships with the action grammar (#6) so the discriminated
+        # union is complete; the real dispatch comes next.
+        return [("tool_dispatch_not_yet_implemented", False)]
 
     raise TypeError(f"unhandled action type: {type(action).__name__}")
 

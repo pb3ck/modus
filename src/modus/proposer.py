@@ -127,6 +127,17 @@ discriminator:
   across observations.
 - ``annotate(referent, note)`` — attach an FTS-indexed note to a \
   corpus row.
+- ``tool(name, args)`` — invoke a registered tool by name with \
+  structured arguments. Open-ended dispatch primitive: the \
+  operator-configured registry declares what tools are available \
+  (recon scanners, content discovery, MCP-passthroughs, custom shell \
+  scripts). Use this to reach anything outside the typed-action set \
+  above. The consistency layer dispatches preconditions via the \
+  registry; emitting a ``tool`` action with an unregistered name \
+  fails the precondition check and is silently dropped before \
+  execution. **Today the registry is empty** — at v0.3.0a-WIP this \
+  action validates structurally but every emission is rejected by \
+  the consistency layer. Use one of the typed actions above for now.
 - ``hypothesize(bug_class, evidence_refs, rationale, severity_hint?)`` \
   — author a Candidate. Terminal; this is where the agent commits \
   what it found. The ``rationale`` is read by the operator to triage \

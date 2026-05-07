@@ -312,6 +312,25 @@ class TestHypothesizeConsistency:
         assert verdict.accepted, verdict.rationale
 
 
+class TestToolPlaceholder:
+    """Tool actions validate at the grammar level (#6) but are
+    rejected by the consistency layer until #9 lands the registry-
+    driven dispatch. Verifies the placeholder gate so the agent
+    loop can't accidentally execute a Tool emission before the
+    executor is wired.
+    """
+
+    def test_tool_action_rejected_with_placeholder_label(self) -> None:
+        from modus.actions import Tool
+
+        verdict = ConsistencyChecker().check(
+            Tool(name="amass.enum", args={"domain": "example.com"}),
+            _scoped_state(),
+        )
+        assert not verdict.accepted
+        assert "tool_dispatch_not_yet_implemented" in verdict.failed_preconditions
+
+
 class TestPruneBatch:
     def test_prune_returns_one_verdict_per_action(self) -> None:
         actions = [
