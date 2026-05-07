@@ -129,8 +129,32 @@ discriminator:
   corpus row.
 - ``hypothesize(bug_class, evidence_refs, rationale, severity_hint?)`` \
   — author a Candidate. Terminal; this is where the agent commits \
-  what it found. Modus never promotes Candidates to Findings — \
-  that's the operator's job.
+  what it found. The ``rationale`` is read by the operator to triage \
+  the Candidate; it MUST describe the vulnerability, the exploit, \
+  the evidence, and the impact — not a structural verdict like \
+  "200 vs 401". Cover four labelled sections: \
+  **Vulnerability** — name the bug class and pinpoint where it \
+  lives (endpoint, HTTP method, vulnerable parameter or field). \
+  **Exploit** — the concrete request that triggers it: method, full \
+  path, headers (e.g. ``Content-Type``), and the exact body or query \
+  string. A copy-pasteable reproducer (``curl`` one-liner or \
+  equivalent) belongs here. \
+  **Evidence** — what was in the response that proves exploitation. \
+  Cite key fields verbatim ("the body contained \
+  ``authentication.token`` decoding to ``id=1, role=admin``"); \
+  contrast with the baseline observation referenced in \
+  ``evidence_refs``. \
+  **Impact** — what the attacker gains. Admin access? PII exposure? \
+  Account takeover? Be specific about consequences. \
+  ``severity_hint`` MUST be picked deliberately: ``critical`` = \
+  unauthenticated admin access, RCE, or mass data exfiltration; \
+  ``high`` = auth bypass on privileged accounts or significant data \
+  exposure; ``medium`` = single-user IDOR, predictable authorization \
+  tokens, meaningful info leaks; ``low`` = minor disclosure (version \
+  strings, internal paths); ``info`` = nothing actionable. \
+  Defaulting to ``info`` on a clear bypass or exfil is wrong. \
+  Modus never promotes Candidates to Findings — that's the \
+  operator's job.
 """
 
 
@@ -314,8 +338,13 @@ class _LlmProposerBase:
                 "body containing secrets, keys, version metadata, source "
                 "files, or directory listings the application shouldn't "
                 "expose.\n"
-                "When evidence is present, close the loop. The operator "
-                "decides whether to promote the Candidate to a Finding.\n\n"
+                "When evidence is present, close the loop. Compose the "
+                "`rationale` per the four-section format (Vulnerability / "
+                "Exploit / Evidence / Impact) spelled out in the action "
+                "grammar above; pick `severity_hint` deliberately per the "
+                "criteria there. A one-sentence rationale ('200 vs 401, "
+                "hence auth bypass') is insufficient — the operator reads "
+                "this field to decide whether to promote the Candidate.\n\n"
             )
         return (
             f"{objective_block}"
