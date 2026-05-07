@@ -171,6 +171,12 @@ class AgentLoop:
         # executes actions; passed into each step's CorpusState via
         # ``_step_context``.
         run_observations: set[str] = set()
+        # Quarry Candidate IDs produced by ``hypothesize`` actions
+        # this run. Feeds CorpusState.run_candidates so the
+        # ``corpus.promote_finding`` precondition can gate promotion
+        # on "this run's candidates only" — cross-run promotion is
+        # the operator's CLI verb, not the agent's.
+        run_candidates: set[str] = set()
 
         for step_index in range(self.budget.max_steps):
             if (time.monotonic() - wall_started) > self.budget.max_wall_seconds:
@@ -183,6 +189,7 @@ class AgentLoop:
                 history=history,
                 bug_classes=tuple(bug_classes),
                 run_observations=frozenset(run_observations),
+                run_candidates=frozenset(run_candidates),
             )
 
             # 1. Propose
@@ -244,6 +251,13 @@ class AgentLoop:
                 obs_id = result.get("observation_id") or result.get("id")
                 if isinstance(obs_id, str) and obs_id:
                     run_observations.add(obs_id)
+                # Track Quarry Candidate IDs produced by hypothesize
+                # actions this run so the next step's
+                # corpus.promote_finding precondition can gate on
+                # "this run's candidates only".
+                cand_id = result.get("candidate_id")
+                if isinstance(cand_id, str) and cand_id:
+                    run_candidates.add(cand_id)
                 empty_streak = 0
             else:
                 if not all_duplicates:
@@ -305,6 +319,7 @@ class AgentLoop:
         history: list[str],
         bug_classes: tuple[str, ...] = (),
         run_observations: frozenset[str] | None = None,
+        run_candidates: frozenset[str] = frozenset(),
     ) -> StepContext:
         from dataclasses import replace as _dc_replace
 
@@ -316,7 +331,11 @@ class AgentLoop:
         # check; the autonomous loop always passes a frozenset
         # (possibly empty), which selects the strict path.
         base_state = self.session.corpus_state()
-        run_state = _dc_replace(base_state, session_observations=run_observations)
+        run_state = _dc_replace(
+            base_state,
+            session_observations=run_observations,
+            run_candidates=run_candidates,
+        )
         return StepContext(
             corpus_state=run_state,
             scope=self.session.scope,

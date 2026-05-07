@@ -480,7 +480,7 @@ class TestCorpusBuiltinSpecs:
         from modus.tools import _promote_finding_preconditions
 
         scope = ScopePolicy(target_name="demo", allowed_assets=frozenset())
-        state = CorpusState(known_evidence=frozenset({"cand-7"}))
+        state = CorpusState(run_candidates=frozenset({"cand-7"}))
         labels = _promote_finding_preconditions({"candidate_id": "cand-7"}, scope, state)
         assert all(value for _, value in labels), labels
 
@@ -491,7 +491,18 @@ class TestCorpusBuiltinSpecs:
         scope = ScopePolicy(target_name="demo", allowed_assets=frozenset())
         # ``cand-7`` was not produced by this run, so promotion of
         # it is structurally rejected.
-        state = CorpusState(known_evidence=frozenset({"cand-other"}))
+        state = CorpusState(run_candidates=frozenset({"cand-other"}))
+        labels = _promote_finding_preconditions({"candidate_id": "cand-7"}, scope, state)
+        assert any(not value for _, value in labels), labels
+
+    def test_promote_finding_preconditions_reject_when_run_pool_empty(self) -> None:
+        from modus.consistency import CorpusState
+        from modus.tools import _promote_finding_preconditions
+
+        scope = ScopePolicy(target_name="demo", allowed_assets=frozenset())
+        # Default empty run_candidates — nothing has been hypothesised
+        # yet this run, so any promotion is structurally rejected.
+        state = CorpusState()
         labels = _promote_finding_preconditions({"candidate_id": "cand-7"}, scope, state)
         assert any(not value for _, value in labels), labels
 

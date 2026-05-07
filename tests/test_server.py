@@ -406,11 +406,25 @@ class TestHypothesizeTool:
                 "bug_class": "idor",
                 "evidence_refs": [observation_id],
                 "rationale": "200 with another tenant's data",
+                "severity_hint": "high",
             },
         )
         assert result["verdict"]["accepted"] is True
         assert len(session.candidates) == 1
         assert session.candidates[0].bug_class == "idor"
+        # The action result now exposes candidate_id (from Quarry's
+        # candidate_create) and severity_hint so the agent loop can
+        # populate run_candidates and the proposer's auto-promotion
+        # rule can reference them on the next step.
+        action_result = result["result"]
+        assert action_result["bug_class"] == "idor"
+        assert action_result["severity_hint"] == "high"
+        # The stub deterministically produces a candidate_id from
+        # (module, key); key is the dedup hash from the action.
+        assert action_result["candidate_id"] is not None
+        assert action_result["candidate_id"].startswith("candidate-agent_hypothesize-idor:")
+        # No persistence_error on the happy path.
+        assert "persistence_error" not in action_result
 
 
 class TestCompareTool:
