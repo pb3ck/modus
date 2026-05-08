@@ -7,7 +7,7 @@ load-bearing document for this shape; ADR 0003 plants it inside
 an MCP tool handler rather than a CLI loop.
 
 The proposer is provider-portable per the project's portability
-rule. Two concrete implementations ship at v0.1:
+rule. Concrete implementations:
 
 * :class:`AnthropicProposer` — uses the Anthropic Messages API.
   Structured around prompt caching: the action grammar, the scope,
@@ -19,10 +19,21 @@ rule. Two concrete implementations ship at v0.1:
   OpenAI-compatible local servers (Ollama, vLLM), and proxies
   (OpenRouter). No cache directives — degrades to structural
   prompt discipline only.
+* :class:`HostSamplingProposer` — delegates to the MCP host's
+  LLM via ``sampling/createMessage`` (ADR 0003 §3). Subscription-
+  billed in principle; in practice neither Claude Desktop nor
+  Claude Code v2.1.136 currently advertise this capability, so
+  this provider returns "Method not found" against Anthropic's
+  products as of 2026-05-08.
+* :class:`ClaudeCliProposer` — workaround for the host-sampling
+  gap above. Shells out to ``claude --print`` per proposer call,
+  using the user's Claude Code authentication (subscription
+  billing) without depending on the MCP sampling protocol.
+  Trade-off: ~3 seconds of Node startup overhead per call.
 
-Both implementations share :class:`_LlmProposerBase` for the
+All implementations share :class:`_LlmProposerBase` for the
 prompt construction, response parsing, and validation logic that
-isn't provider-specific. Adding a third provider is roughly
+isn't provider-specific. Adding a fifth provider is roughly
 "implement ``_complete``."
 """
 
@@ -575,6 +586,146 @@ class HostSamplingProposer(_LlmProposerBase):
         return str(text)
 
 
+# ----------------------------------------------------------- claude-cli
+
+
+class ClaudeCliProposer(_LlmProposerBase):
+    """Proposer that shells out to ``claude --print`` for each call.
+
+    Workaround for the host-sampling gap (#33): Anthropic's MCP
+    client implementations don't yet expose ``sampling/createMessage``,
+    so :class:`HostSamplingProposer` cannot route proposer calls
+    through Claude Desktop or Claude Code's MCP transport. This
+    proposer instead invokes the ``claude`` CLI binary as a
+    subprocess per call, using its non-interactive ``--print`` mode.
+
+    The CLI reads OAuth/keychain credentials when run without
+    ``--bare``, so authenticated sessions bill against the
+    operator's Claude Pro/Max subscription rather than an API
+    token. The ``cost_usd`` field in the JSON response is
+    informational — actual billing flows through the subscription.
+
+    Trade-offs vs. :class:`AnthropicProposer`:
+
+    * **Cost model**: subscription-flat vs. per-token. Long
+      engagements eat into the Pro/Max weekly/5-hour quotas,
+      after which the CLI falls back to a "rate limit reached"
+      error that this proposer surfaces as an empty action list.
+    * **Latency**: ~3-5 seconds of Node startup overhead per
+      call on top of the LLM round-trip. A 30-step session adds
+      ~90-150 seconds of wall-clock vs. direct API.
+    * **Default model**: whatever Claude Code defaults to (Opus
+      4.7 with 1M context as of 2026-05-08), unless overridden
+      via ``MODUS_LLM_MODEL``. Top-tier reasoning by default.
+    * **TOS**: Anthropic's terms for programmatic CLI use are
+      implicit-OK at best. If they introduce restrictions, this
+      provider is the first thing to break. The user is on the
+      hook for accepting that risk.
+
+    Configure via ``MODUS_LLM_PROVIDER=claude-cli`` and
+    optionally ``MODUS_CLAUDE_BIN`` (defaults to ``claude``;
+    operators with nvm-installed binaries set the absolute path).
+    """
+
+    DEFAULT_MODEL = "<claude-cli-default>"
+
+    def __init__(
+        self,
+        *,
+        scope: ScopePolicy,
+        claude_bin: str = "claude",
+        model: str | None = None,
+        max_tokens: int = 4096,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        super().__init__(
+            scope=scope,
+            model=model or self.DEFAULT_MODEL,
+            max_tokens=max_tokens,
+        )
+        self._claude_bin = claude_bin
+        self._timeout_seconds = timeout_seconds
+
+    async def _complete(self, system: str, user: str) -> str:
+        import asyncio
+
+        # Build argv. ``--print`` (non-interactive), ``--output-format json``
+        # (structured response with the model output in ``result``),
+        # ``--append-system-prompt`` (Modus's action-grammar prompt sits
+        # alongside Claude Code's default system prompt rather than
+        # replacing it; ``--system-prompt`` would replace, but the
+        # default Claude Code prompt's tool-use rules don't conflict
+        # with proposer instructions in practice).
+        #
+        # NOT using ``--bare``: that mode strips OAuth/keychain reads
+        # and forces ANTHROPIC_API_KEY usage, which would defeat the
+        # subscription-billing premise.
+        argv = [
+            self._claude_bin,
+            "--print",
+            "--output-format",
+            "json",
+            "--no-session-persistence",  # proposer calls are stateless
+            "--append-system-prompt",
+            system,
+        ]
+        if self._model and self._model != self.DEFAULT_MODEL:
+            argv.extend(["--model", self._model])
+
+        # Pipe the user prompt via stdin to keep argv bounded — the
+        # action-grammar system prompt alone is ~5KB and some shells
+        # cap argv length at 256KB.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            _LOG.error("claude CLI not found at %r: %s", self._claude_bin, exc)
+            return ""
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=user.encode("utf-8")),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            _LOG.error(
+                "claude --print timed out after %.1fs; killing subprocess",
+                self._timeout_seconds,
+            )
+            proc.kill()
+            await proc.wait()
+            return ""
+
+        if proc.returncode != 0:
+            _LOG.error(
+                "claude --print exited %d: %s",
+                proc.returncode,
+                stderr.decode("utf-8", errors="replace")[:500],
+            )
+            return ""
+
+        try:
+            payload = json.loads(stdout.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            _LOG.error("claude --print returned non-JSON: %s", exc)
+            return ""
+
+        if payload.get("is_error"):
+            _LOG.error(
+                "claude --print reported error: %s",
+                payload.get("api_error_status") or payload.get("result"),
+            )
+            return ""
+
+        result = payload.get("result")
+        if not isinstance(result, str):
+            return ""
+        return result
+
+
 # ----------------------------------------------------------- factory
 
 
@@ -604,6 +755,12 @@ def make_proposer(
                 "MCP request context."
             )
         return HostSamplingProposer(scope=scope, mcp_session=mcp_session)
+    if llm.provider == "claude-cli":
+        return ClaudeCliProposer(
+            scope=scope,
+            claude_bin=llm.base_url or "claude",
+            model=llm.model,
+        )
     if llm.provider == "anthropic":
         return AnthropicProposer(scope=scope, api_key=llm.api_key, model=llm.model)
     if llm.provider in ("openai", "openai-compatible"):
@@ -635,6 +792,7 @@ class FixedProposer:
 
 __all__ = [
     "AnthropicProposer",
+    "ClaudeCliProposer",
     "FixedProposer",
     "HostSamplingProposer",
     "OpenAICompatibleProposer",

@@ -97,12 +97,22 @@ class LlmProviderConfig:
           API key in env. Useful when the host doesn't support
           sampling, or when the operator wants Modus's internal
           LLM to be different from the host's.
+        * ``claude-cli`` — shells out to ``claude --print`` per
+          proposer call. Subscription-billed (uses Claude Code's
+          OAuth/keychain auth), no API token required. Workaround
+          for the ``host`` provider when the MCP host doesn't
+          implement ``sampling/createMessage`` (Anthropic's
+          clients as of 2026-05-08). Set ``MODUS_LLM_BASE_URL`` to
+          the absolute path of the claude binary (defaults to
+          ``claude`` on PATH); operators with nvm-installed
+          binaries set the absolute path. Trade-off: ~3 seconds
+          of Node startup overhead per call.
         """
         env = env if env is not None else dict(os.environ)
         provider = env.get("MODUS_LLM_PROVIDER", "").strip().lower()
         if not provider:
             return None
-        valid = {"host", "anthropic", "openai", "openai-compatible"}
+        valid = {"host", "anthropic", "openai", "openai-compatible", "claude-cli"}
         if provider not in valid:
             raise ValueError(f"MODUS_LLM_PROVIDER={provider!r} is not one of {sorted(valid)}")
         return cls(
@@ -110,7 +120,7 @@ class LlmProviderConfig:
             model=env.get("MODUS_LLM_MODEL") or None,
             api_key=(
                 None
-                if provider == "host"
+                if provider in ("host", "claude-cli")
                 else env.get("ANTHROPIC_API_KEY")
                 if provider == "anthropic"
                 else env.get("OPENAI_API_KEY")

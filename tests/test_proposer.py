@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from modus.actions import Action, Probe, Request
 from modus.consistency import CorpusState
@@ -398,6 +401,176 @@ class TestLlmProviderConfigHost:
         assert cfg is not None
         assert cfg.provider == "host"
         assert cfg.api_key is None
+
+
+class TestLlmProviderConfigClaudeCli:
+    """Subscription-billed CLI workaround for the host-sampling gap."""
+
+    def test_claude_cli_provider_no_api_key_required(self) -> None:
+        cfg = LlmProviderConfig.from_env({"MODUS_LLM_PROVIDER": "claude-cli"})
+        assert cfg is not None
+        assert cfg.provider == "claude-cli"
+        assert cfg.api_key is None
+
+    def test_claude_cli_provider_picks_up_base_url_as_binary_path(self) -> None:
+        cfg = LlmProviderConfig.from_env(
+            {
+                "MODUS_LLM_PROVIDER": "claude-cli",
+                "MODUS_LLM_BASE_URL": "/Users/paulbeck/.local/bin/claude",
+            }
+        )
+        assert cfg is not None
+        assert cfg.base_url == "/Users/paulbeck/.local/bin/claude"
+
+
+# ------------------------------------------------------------ ClaudeCliProposer
+
+
+class TestClaudeCliProposer:
+    """Subprocess-based CLI proposer.
+
+    Uses a fake claude binary (a tiny shell script) so the tests are
+    deterministic and don't require subscription auth.
+    """
+
+    @staticmethod
+    def _make_fake_claude(
+        tmp_path: Path,
+        *,
+        stdout: str,
+        stderr: str = "",
+        exit_code: int = 0,
+        delay_seconds: float = 0.0,
+    ) -> Path:
+        """Generate a fake claude binary that emits stdout/stderr and exits.
+
+        Writes the canned outputs to sibling files and ``cat``s them
+        from the script — avoids any shell-quoting issues with JSON
+        payloads that contain quotes, backslashes, etc.
+        """
+        binary = tmp_path / "fake-claude"
+        stdout_file = tmp_path / "fake-claude-stdout"
+        stderr_file = tmp_path / "fake-claude-stderr"
+        stdout_file.write_text(stdout)
+        stderr_file.write_text(stderr)
+        sleep_line = f"sleep {delay_seconds}\n" if delay_seconds > 0 else ""
+        script = (
+            f"#!/bin/sh\n{sleep_line}cat {stdout_file}\ncat {stderr_file} >&2\nexit {exit_code}\n"
+        )
+        binary.write_text(script)
+        binary.chmod(0o755)
+        return binary
+
+    async def test_round_trip_via_subprocess(self, tmp_path: Path) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        canned_inner = json.dumps({"actions": [{"kind": "probe", "target": "target.example.com"}]})
+        # claude --print --output-format json wraps the model output in a
+        # ``result`` field; mimic that shape.
+        canned_outer = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": canned_inner,
+                "duration_ms": 1500,
+            }
+        )
+        fake = self._make_fake_claude(tmp_path, stdout=canned_outer)
+        proposer = ClaudeCliProposer(scope=_scope(), claude_bin=str(fake))
+
+        actions = await proposer.propose(_step_context())
+        assert len(actions) == 1
+        assert isinstance(actions[0], Probe)
+        assert actions[0].target == "target.example.com"
+
+    async def test_returns_empty_when_subprocess_exits_nonzero(self, tmp_path: Path) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        fake = self._make_fake_claude(
+            tmp_path,
+            stdout="",
+            stderr="claude: not authenticated\\n",
+            exit_code=1,
+        )
+        proposer = ClaudeCliProposer(scope=_scope(), claude_bin=str(fake))
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+    async def test_returns_empty_on_non_json_output(self, tmp_path: Path) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        fake = self._make_fake_claude(tmp_path, stdout="not json at all")
+        proposer = ClaudeCliProposer(scope=_scope(), claude_bin=str(fake))
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+    async def test_returns_empty_on_is_error_payload(self, tmp_path: Path) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        # claude --print returns is_error=true on auth failures, rate
+        # limits, etc. — surface as an empty proposer result so the
+        # autonomous loop's pattern fallback can still fire.
+        canned = json.dumps(
+            {
+                "type": "result",
+                "is_error": True,
+                "api_error_status": "rate_limit_exceeded",
+                "result": None,
+            }
+        )
+        fake = self._make_fake_claude(tmp_path, stdout=canned)
+        proposer = ClaudeCliProposer(scope=_scope(), claude_bin=str(fake))
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+    async def test_returns_empty_on_missing_binary(self) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        proposer = ClaudeCliProposer(scope=_scope(), claude_bin="/nonexistent/path/to/claude-cli")
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+    async def test_timeout_kills_subprocess(self, tmp_path: Path) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        # Fake claude that sleeps longer than the timeout.
+        fake = self._make_fake_claude(tmp_path, stdout="", delay_seconds=5.0)
+        proposer = ClaudeCliProposer(
+            scope=_scope(),
+            claude_bin=str(fake),
+            timeout_seconds=0.5,
+        )
+        actions = await proposer.propose(_step_context())
+        assert actions == []
+
+
+class TestMakeProposerClaudeCli:
+    def test_claude_cli_provider_constructs(self) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        cfg = LlmProviderConfig(
+            provider="claude-cli",
+            model=None,
+            api_key=None,
+            base_url="/usr/local/bin/claude",
+        )
+        proposer = make_proposer(llm=cfg, scope=_scope())
+        assert isinstance(proposer, ClaudeCliProposer)
+
+    def test_claude_cli_provider_default_binary_when_no_base_url(self) -> None:
+        from modus.proposer import ClaudeCliProposer
+
+        cfg = LlmProviderConfig(
+            provider="claude-cli",
+            model=None,
+            api_key=None,
+            base_url=None,
+        )
+        proposer = make_proposer(llm=cfg, scope=_scope())
+        assert isinstance(proposer, ClaudeCliProposer)
+        # Default binary name "claude" (relies on PATH at run time).
+        assert proposer._claude_bin == "claude"  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------ FixedProposer
