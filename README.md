@@ -26,13 +26,16 @@ or equivalent tool exists in the registry, and adding one is
 off-limits. Submission of a Finding to a programme is the operator's,
 performed outside Modus.
 
-> **Status: alpha (0.4.0a2).** The autonomous loop runs end-to-end
-> against authorized targets *and* closes the Candidate→Finding
-> lifecycle inside the run — see [`docs/quickstart.md`](./docs/quickstart.md).
-> The action vocabulary (open `ToolRegistry` per ADR-0004), the
-> formal consistency check, the corpus interface, and the
-> submission-line invariant are committed surfaces; everything else
-> may shift between alpha releases until 1.0.
+> **Status: 0.4.0 (early release).** The autonomous loop runs
+> end-to-end against authorized targets *and* closes the
+> Candidate→Finding lifecycle inside the run — see
+> [`docs/quickstart.md`](./docs/quickstart.md). The action
+> vocabulary (open `ToolRegistry` per ADR-0004), the formal
+> consistency check, the corpus interface, the submission-line
+> invariant, and the autonomous-session MCP tool surface are
+> committed surfaces; everything else may shift between minor
+> releases until 1.0. v0.4.0 is the first non-pre-release tag —
+> alphas precede it back to 0.1.0a1.
 
 ## What this is
 

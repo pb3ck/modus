@@ -193,7 +193,7 @@ What `0.3.0a1` ships:
   off-limits, terminal state is a Candidate in storage); the
   verbal ban on rationales recommending submission is dropped.
 
-## Milestone 7 — Autonomous Candidate→Finding promotion (0.4.0a1 shipped)
+## Milestone 7 — Autonomous Candidate→Finding promotion (0.4.0 shipped)
 
 The autonomous loop closes the full hypothesize → Quarry-
 persisted Candidate → Finding lifecycle inside a single
@@ -247,12 +247,19 @@ step 5 to unblock the LLM; phi4 emitted four more
 hypothesizes and three promotions on its own afterward. The
 severity=info Candidate stayed un-promoted per the policy.
 
-The non-pre-release `0.4.0` tag still wants the operator-UX
-gap closed: the `run_autonomous_session` MCP tool doesn't yet
-expose `initial_observation_ids` over the wire, so MCP-host
-operators can't drive the seeded-corpus flow without a Python
-driver script. Follow-up work, plus the same external-
-operator-without-hand-holding test the prior tags want.
+The non-pre-release `0.4.0` tag shipped 2026-05-08 once the
+operator-UX gap closed: the autonomous-session MCP tools accept
+`recon_jsonl_path` (#21) and auto-load from the Quarry corpus
+via `seed_from_corpus=True` (#23), so MCP-host operators can
+drive the full seeded-corpus autonomous flow with zero Python
+driver scripts and zero arguments beyond `target` and
+`bug_classes`. The doc-following dry-run before tagging surfaced
+five friction points (#26) — stale tool count, missing
+`quarry target add` step, payload field mismatches — all fixed
+in the tagged release. The external-operator-without-hand-
+holding human-test remains an unwritten test the v0.4.0 release
+notes acknowledge openly; it's deferred to whatever real user
+runs the docs first.
 
 ## Beyond v0.4
 

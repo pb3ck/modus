@@ -10,50 +10,109 @@ notice.
 
 ## [Unreleased]
 
-### Added
+## [0.4.0] — 2026-05-08
 
-- **`findings_promoted` in autonomous-session result payload.**
-  Each `run_autonomous_session` / `start_autonomous_session`
-  result now includes a `findings_promoted` field — a list of
-  the Findings the autonomous loop auto-promoted this run, in
-  Quarry's `finding_promote` shape (`{finding_id, candidate_id,
-  severity, title, status, ...}`). Operators reading the result
-  in their MCP host's transcript see the Findings landed without
-  having to round-trip through Quarry's CLI. Surfaces what was
-  previously only visible by inspecting `record.steps` or
-  querying `quarry finding list`.
-- **`corpus_seeded_observation_count` in the result payload
-  AND on `SessionRecord.to_payload()`.** Distinguishes the two
-  seeding paths: `corpus_seeded_observation_count` counts
-  observations Modus auto-loaded from Quarry's corpus via
-  `list_response_artifacts`; `seeded_observation_count` continues
-  to count observations from the optional `recon_jsonl_path`
-  JSONL. Operators can tell at a glance whether the corpus
-  auto-load picked up anything.
-- **`SessionRecord.corpus_seeded_observation_count`** field —
-  populated by `AgentLoop.run` when `seed_from_corpus=True`.
-  The audit record now carries the auto-load count alongside
-  the existing step / executed counters.
+First non-pre-release tag. **Modus's autonomous loop closes the
+full hypothesize → Quarry-persisted Candidate → Finding lifecycle
+inside a single `run_autonomous_session` call, severity-gated.**
+Operators drive the seeded-corpus autonomous flow from any
+MCP host (Claude Desktop primarily) with zero Python driver
+scripts and zero arguments beyond `target` and `bug_classes`.
 
-### Changed
+The four invariants from ADR-0001 still hold under the new shape:
+typed actions, formal Z3 consistency check, Quarry-backed corpus,
+storage-enforced submission line. What changes from 0.3.0a1: the
+agent now closes the Candidate→Finding promotion lifecycle that
+operators previously had to drive via the Quarry CLI.
 
-- **`docs/quickstart.md` corrected** for several stale claims a
-  doc-following dry-run surfaced:
-  - §3 tool count was "eighteen"; actual is 22 (7 verified-action
-    + 10 Quarry passthrough + 5 autonomous-session). Replaced
-    the bare number with the breakdown.
-  - §4 missing `quarry target add <name>` step before
-    `quarry ingest` — added.
-  - §5 referenced a `findings` field in the result payload that
-    didn't exist; result actually carried `candidates` only.
-    Now `findings_promoted` exists (see Added) and §5 documents
-    the real payload shape.
-  - §4b documented `seeded_observation_count` in a way that
-    conflated JSONL-loaded and corpus-loaded counts; rewritten
-    to distinguish the two.
-  - §2 "Validate the file" wording was misleading — the
-    command tested the action validator, not the operator's
-    scope file. Reworded as a smoke test of install correctness.
+Live-verified end-to-end on OWASP Juice Shop with phi4:14b on
+local Ollama (M1 Pro, 16 GB unified): 22-step run produced 5
+Candidates and 4 auto-promoted Findings (high / high / medium
+/ high). Severity gating verified live — the severity-info
+Candidate correctly stayed un-promoted per the threshold rule.
+The deterministic fallback proposer fired once at step 5 to
+unblock the LLM's commitment gap; phi4 emitted four more
+hypothesizes and three promotions on its own afterward.
+
+What 0.4.0 ships with that 0.3.0a1 didn't:
+
+- **Autonomous Candidate→Finding promotion.**
+  `corpus.promote_finding` builtin in the default tool registry
+  (9 default builtins, was 8). Severity-gated: medium/high/critical
+  Candidates auto-promote inside the run; low/info stay
+  un-promoted for operator review.
+- **Agent-authored Candidates persist to Quarry.** The
+  `hypothesize` action funnels into `db.upsert_candidate` via
+  Quarry's new `candidate_create` MCP write tool. Module name
+  `agent_hypothesize`; dedup key
+  `<bug_class>:<sorted_evidence_refs>`; score derived
+  monotonically from `severity_hint`.
+- **Pattern-driven fallback proposer.** Per-bug-class detectors
+  (`info_disclosure` / `auth_bypass` / `idor` / `sqli`) match
+  against the run's observations and synthesize `Hypothesize`
+  plus `corpus.promote_finding` proposals when the LLM keeps
+  abdicating. Frontier models commit on their own — the fallback
+  only fires for mid-size open-weight models hitting the
+  decisiveness gap.
+- **Auto-load run pool from Quarry corpus** (default
+  `seed_from_corpus=True`). When the operator has run
+  `quarry ingest --target X --source responses ...`, Modus
+  pulls the ingested evidence back as structured records via
+  Quarry's new `list_response_artifacts` MCP read tool and
+  seeds the run's evidence pool automatically. From the MCP
+  host it's just `run_autonomous_session(target=..., bug_classes=[...])`.
+- **`recon_jsonl_path` argument** on the autonomous-session
+  MCP tools for layering additional recon JSONL on top of the
+  corpus auto-load (operators with recon they didn't ingest).
+  Both sources combine, deduped by observation id.
+- **`findings_promoted` in the result payload** — list of
+  Findings the autonomous loop auto-promoted this run, in
+  Quarry's `finding_promote` shape. Operators see the Findings
+  landed without round-tripping through Quarry's CLI.
+- **Submission policy revised.** ADR-0002 §4 / 0003 §6 / 0004
+  amended; persistent `submission_line.md` memory updated. The
+  structural firewall on *external submission* (no `submit` /
+  `publish` / `post` / `report` / `report-to-h1` tool in the
+  registry, adding one is off-limits) is preserved unchanged.
+  The earlier "promotion is operator-only via the Quarry CLI"
+  stance is dropped — Candidate→Finding is corpus-internal,
+  not an outbound action against a third party.
+
+Quarry compatibility: requires Quarry main as of 2026-05-08
+(post pb3ck/quarry#109 finding_promote, #111 candidate_create,
+#113 list_response_artifacts). Older Quarry servers connect
+fine but the auto-load and promotion paths skip with INFO
+warnings — the loop falls back to whatever
+`recon_jsonl_path` JSONL or `initial_observation_ids` the caller
+provided.
+
+### Test posture
+
+312 tests pass, 5 deselected (integration tests requiring
+`amass`, `nuclei`, or a `quarry` binary). ruff format/check
+clean, mypy strict clean across all 16 source modules.
+
+### What v0.4.0 doesn't include
+
+The external-operator-without-hand-holding human-test that's
+been gating every prior tag. Modus's structural pieces are all
+in place and verified live on local hardware; what's missing is
+a third-party operator following `docs/quickstart.md` from a
+clean machine. The doc-following dry-run we did before tagging
+caught five friction points (stale tool count, missing
+`quarry target add` step, payload field mismatches) and fixed
+them — but a real external user is still the unwritten test.
+The non-pre-release tag commits to the current API shape;
+breaking changes will land at v0.5.0+ in the usual semver way.
+
+### Issues closed at 0.4.0
+
+- v0.4.0: #12, #13, #14, #16, #18, #21, #23, #26
+- Plus alphas: 0.4.0a1 (#12, #13, #14, #16, #18), 0.4.0a2 (#21, #23)
+
+For the alpha-by-alpha narrative see the [0.4.0a1] and [0.4.0a2]
+sections below; both alphas predated this release on
+2026-05-08.
 
 ## [0.4.0a2] — 2026-05-08
 
