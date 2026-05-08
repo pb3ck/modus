@@ -10,6 +10,51 @@ notice.
 
 ## [Unreleased]
 
+## [0.4.0a2] — 2026-05-08
+
+Operator-UX bridge alpha. Closes the gap between the v0.4.0a1
+chain-closure work (autonomous Candidate→Finding loop verified
+live) and a real external-operator-without-hand-holding flow:
+the autonomous-session MCP tools now accept the operator's
+recon as input — either via an explicit JSONL path or auto-loaded
+from the Quarry corpus the operator already ingested into.
+
+What 0.4.0a2 ships with that 0.4.0a1 didn't:
+
+- **Auto-load from Quarry corpus** (default behaviour). When the
+  operator has run `quarry ingest --target X --source responses
+  /path/to/recon.jsonl`, Modus's autonomous loop pulls the
+  ingested evidence back as structured records via Quarry's new
+  `list_response_artifacts` MCP read tool and seeds the run's
+  evidence pool automatically. From the MCP host it's just
+  `run_autonomous_session(target=..., bug_classes=[...])` —
+  no path arguments needed.
+- **`recon_jsonl_path` argument** for layering additional
+  recon JSONL on top of the corpus auto-load (operators with
+  recon they didn't ingest, or who want the seeded-corpus run
+  without the ingest step). Both sources combine, deduped by
+  observation id.
+- **`seed_from_corpus: bool` argument** (default `true`) so
+  operators who explicitly want a cold-start run can opt out.
+- **`docs/quickstart.md` §4 rewritten** with the recon →
+  ingest → autonomous workflow. Operator-friendly default:
+  one `quarry ingest` call, then a sentence to Claude Desktop.
+
+What's new since 0.4.0a1 (full detail under "Added"/"Changed"
+below):
+
+- `corpus.list_response_artifacts` Quarry MCP read tool
+  (Quarry-side, see Quarry CHANGELOG).
+- `QuarryMcpClient.list_response_artifacts(...)` async method.
+- `ResponseArtifact` dataclass.
+- `AgentLoop.run(seed_from_corpus=True, initial_observation_ids=...)`
+  — both new parameters.
+- `_seed_observations_from_jsonl` server-side helper that
+  materialises a `responses`-shape JSONL into SessionObservations
+  for the autonomous-loop run pool.
+- 17 new tests across `test_corpus.py`, `test_agent.py`, and
+  `test_server.py`. 309 pass total (was 294 in 0.4.0a1).
+
 ### Added
 
 - **`seed_from_corpus` argument on `run_autonomous_session` /
