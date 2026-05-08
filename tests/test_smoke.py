@@ -11,7 +11,7 @@ import modus
 
 
 def test_version_is_set() -> None:
-    assert modus.__version__ == "0.3.0a1"
+    assert modus.__version__ == "0.4.0a1"
 
 
 def test_version_is_string() -> None:

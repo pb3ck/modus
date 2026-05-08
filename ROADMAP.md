@@ -193,59 +193,68 @@ What `0.3.0a1` ships:
   off-limits, terminal state is a Candidate in storage); the
   verbal ban on rationales recommending submission is dropped.
 
-## Milestone 7 — Autonomous Candidate→Finding promotion (in progress)
+## Milestone 7 — Autonomous Candidate→Finding promotion (0.4.0a1 shipped)
 
-The autonomous loop closes the Candidate→Finding lifecycle
-inside its own run instead of handing off to a CLI invocation.
-ADR-0002 §4 amended; ADR-0003 §6 amended; ADR-0004's
-"Submission line" amended.
+The autonomous loop closes the full hypothesize → Quarry-
+persisted Candidate → Finding lifecycle inside a single
+`run_autonomous_session` call, severity-gated. ADR-0002 §4
+amended; ADR-0003 §6 amended; ADR-0004's "Submission line"
+amended.
 
-What this milestone delivers:
+What `0.4.0a1` ships:
 
-- **`corpus.promote_finding` builtin** — registered in the
-  default `ToolRegistry` (alongside the typed-action builtins
-  and the recon shells), dispatching to
-  `modus.builtins.corpus.promote_finding`, which calls Quarry's
-  MCP `finding_promote` write tool via
-  `QuarryMcpClient.promote_finding`. Per-tool precondition gates
-  the Candidate id on this run's observation pool — cross-run
-  promotion remains the operator's `quarry finding promote` CLI
-  verb.
-- **Severity-gated proposer rule** — system prompt instructs
-  the model to emit `corpus.promote_finding` on the step after
-  any `hypothesize` whose `severity_hint` was `medium`, `high`,
-  or `critical`. Severity-`low` and severity-`info` Candidates
-  stay un-promoted for operator review. Promoting a low/info
-  Candidate is a policy violation.
-- **Quarry-side write tool** — `finding_promote` exposed on
-  Quarry's MCP surface as a peer to the existing read tools and
-  the `analyze_*` write tools. Returns the new Finding's
-  fields verbatim. Status is always `hypothesis` on first
-  promotion.
+- **`corpus.promote_finding` builtin** in the default
+  `ToolRegistry`, dispatching to
+  `modus.builtins.corpus.promote_finding` → Quarry's MCP
+  `finding_promote` write tool. Per-tool precondition gates the
+  Candidate id on this run's pool; cross-run promotion remains
+  the operator's `quarry finding promote` CLI verb.
+- **Agent-authored Candidates persist to Quarry.** The
+  `hypothesize` action handler funnels the SessionCandidate
+  into Quarry's `db.upsert_candidate` via the new
+  `candidate_create` MCP write tool (Quarry-side), so the
+  resulting row is byte-identical to what the analytical
+  modules produce. Module name `agent_hypothesize`; dedup key
+  `<bug_class>:<sorted_evidence_refs>`; score derived
+  monotonically from `severity_hint`.
+- **Severity-gated auto-promotion**: medium/high/critical
+  Candidates auto-promote to Findings inside the run; low/info
+  stay un-promoted for operator review.
+- **Pattern-driven fallback proposer** that closes the
+  decisiveness gap mid-size open-weight models hit on the
+  autonomous loop. Per-bug-class detectors
+  (info_disclosure / auth_bypass / idor / sqli) match against
+  the run's observations and synthesize `Hypothesize` plus
+  `corpus.promote_finding` proposals when the LLM keeps
+  abdicating. Frontier models reach the lifecycle on their
+  own — the fallback only fires when local models won't.
+- **`AgentLoop.run(initial_observation_ids=...)`** parameter
+  to seed the run pool from operator recon (typically `httpx`,
+  `katana`, or `responses`-shape JSONL ingested into Quarry
+  before the autonomous run starts).
 - **Submission firewall: unchanged.** No `submit`/`publish`/
-  `post`/`report`/`report-to-h1` tool exists in the registry,
-  none will be added, declaring one in a scope file's `tools`
-  block is a policy violation. Submission to bug-bounty
-  programmes remains the operator's, performed outside Modus.
+  `post`/`report`/`report-to-h1` tool exists in the registry;
+  declaring one in a scope file's `tools` block is a policy
+  violation. Submission to bug-bounty programmes remains the
+  operator's, performed outside Modus.
 
-The non-pre-release `0.4.0` tag wants a Juice Shop run that
-end-to-end produces Findings (not just Candidates) autonomously
-through the MCP host, with severity gating verified live (a
-severity-`info` Candidate stays a Candidate; a severity-`high`
-Candidate becomes a Finding without operator intervention).
+Verified live 2026-05-08: phi4:14b on M1 Pro / 16 GB unified,
+against an OWASP Juice Shop corpus seeded with 38 recon
+evidence chunks, produced 5 Candidates and 4 auto-promoted
+Findings (high / high / medium / high) end-to-end inside one
+22-step autonomous run. The fallback fired exactly once at
+step 5 to unblock the LLM; phi4 emitted four more
+hypothesizes and three promotions on its own afterward. The
+severity=info Candidate stayed un-promoted per the policy.
 
-Verified live: gemma2:9b on M1 Pro / 16 GB unified producing
-seven distinct Juice Shop Candidates autonomously through the
-MCP host, all four-section rationales, accurate `evidence_refs`,
-correct `severity_hint`.
+The non-pre-release `0.4.0` tag still wants the operator-UX
+gap closed: the `run_autonomous_session` MCP tool doesn't yet
+expose `initial_observation_ids` over the wire, so MCP-host
+operators can't drive the seeded-corpus flow without a Python
+driver script. Follow-up work, plus the same external-
+operator-without-hand-holding test the prior tags want.
 
-The non-pre-release `0.3.0` tag still wants the same external-
-operator-without-hand-holding test the 0.1.0 tag does, plus the
-follow-ups documented in ADR-0004 §"Open follow-ups": full
-typed-action subsumption into the registry, real MCP-passthrough
-backend, registry rendering in the proposer's prompt.
-
-## Beyond v0.3
+## Beyond v0.4
 
 Out of scope for v0.1 and intentionally deferred:
 
