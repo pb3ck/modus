@@ -1245,7 +1245,10 @@ async def serve(scope_path: Path) -> int:
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(session)
         executor = await stack.enter_async_context(
-            HttpExecutor(user_agent=session.scope.user_agent)
+            HttpExecutor(
+                user_agent=session.scope.user_agent,
+                extra_default_headers=dict(session.scope.default_headers),
+            )
         )
         tool_executor = ToolExecutor(session=session, scope=session.scope)
         modus = ModusServer(

@@ -80,6 +80,121 @@ class TestScopePolicy:
             )
 
 
+class TestScopeDefaultHeaders:
+    """Operator-pinned headers sent on every outbound request.
+
+    The motivating case is bug-bounty researcher-identifying headers
+    (``X-HackerOne-Research``, ``X-Bugcrowd-Researcher``, etc.) the
+    program requires on every probe. Pinning them in scope means
+    the agent cannot accidentally omit them.
+    """
+
+    def test_default_is_empty_dict(self) -> None:
+        policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
+        assert policy.default_headers == {}
+
+    def test_h1_research_header_round_trips(self) -> None:
+        policy = ScopePolicy(
+            target_name="anduril",
+            allowed_assets=frozenset({"foxglove.bunker.anduril.dev"}),
+            default_headers={"X-HackerOne-Research": "pb3ck"},
+        )
+        assert policy.default_headers == {"X-HackerOne-Research": "pb3ck"}
+
+    def test_from_json_with_default_headers(self, tmp_path: Path) -> None:
+        path = tmp_path / "scope.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "target_name": "anduril",
+                    "allowed_assets": ["foxglove.bunker.anduril.dev"],
+                    "default_headers": {"X-HackerOne-Research": "pb3ck"},
+                }
+            )
+        )
+        policy = ScopePolicy.from_json(path)
+        assert policy.default_headers["X-HackerOne-Research"] == "pb3ck"
+
+    def test_empty_header_name_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"": "value"},
+            )
+
+    def test_empty_header_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"X-Researcher": ""},
+            )
+
+    def test_header_name_with_space_rejected(self) -> None:
+        # RFC 7230 token chars exclude whitespace.
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"X Researcher": "pb3ck"},
+            )
+
+    def test_header_name_with_colon_rejected(self) -> None:
+        # Colon is the field separator; rejecting it prevents the
+        # operator from accidentally pasting a full header line.
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"X-Researcher: x": "pb3ck"},
+            )
+
+    def test_header_value_with_crlf_rejected(self) -> None:
+        # CR/LF in header values would let an operator (or, more
+        # importantly, a config-file-injection attacker) inject
+        # additional headers — classic header-injection vector.
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"X-Researcher": "pb3ck\r\nX-Inject: y"},
+            )
+
+    def test_user_agent_in_default_headers_rejected(self) -> None:
+        # User-Agent has a dedicated field; allowing both surfaces
+        # would let them disagree silently.
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"User-Agent": "Custom/1.0"},
+            )
+
+    def test_user_agent_lowercase_in_default_headers_also_rejected(self) -> None:
+        # Header names are case-insensitive per RFC 7230; the
+        # User-Agent guard must too.
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset({"a.example.com"}),
+                default_headers={"user-agent": "Custom/1.0"},
+            )
+
+    def test_multiple_headers_round_trip(self) -> None:
+        policy = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"a.example.com"}),
+            default_headers={
+                "X-HackerOne-Research": "pb3ck",
+                "X-Engagement-ID": "anduril-2026-05-08",
+            },
+        )
+        assert len(policy.default_headers) == 2
+        assert policy.default_headers["X-HackerOne-Research"] == "pb3ck"
+        assert policy.default_headers["X-Engagement-ID"] == "anduril-2026-05-08"
+
+
 class TestAllowedEndpointParsing:
     def test_bare_hostname_is_wildcard(self) -> None:
         policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"example.com"}))

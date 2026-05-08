@@ -383,6 +383,153 @@ class TestRequestTool:
         assert "method_allowed:DELETE" in result["verdict"]["failed_preconditions"]
         assert session.observations == []
 
+    async def test_default_headers_from_scope_appear_on_outbound_request(self) -> None:
+        # The motivating case: HackerOne programs require
+        # ``X-HackerOne-Research: <username>`` on every probe.
+        # Pinning it in scope means the agent cannot omit it.
+        seen_headers: list[dict[str, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_headers.append(dict(request.headers))
+            return httpx.Response(200, text="ok")
+
+        scope = ScopePolicy(
+            target_name="anduril",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            default_headers={"X-HackerOne-Research": "pb3ck"},
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = HttpExecutor(
+            user_agent=session.scope.user_agent,
+            extra_default_headers=dict(session.scope.default_headers),
+        )
+        executor._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={
+                "User-Agent": session.scope.user_agent,
+                **session.scope.default_headers,
+            },
+        )
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
+        await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/"},
+        )
+        assert len(seen_headers) == 1
+        # httpx normalises header names to lowercase on the request.
+        assert seen_headers[0].get("x-hackerone-research") == "pb3ck"
+
+    async def test_observation_request_headers_capture_merged_set(self) -> None:
+        # Bug A regression (2026-05-08 Anduril tool-validation run):
+        # the audit record's ``request_headers`` only captured the
+        # per-request action.headers slice, not the merged set
+        # actually sent on the wire. For bug-bounty programs that
+        # require an identifying header on every probe, this means
+        # the audit can't substantiate compliance even when the
+        # header IS being sent. The fix uses ``build_request`` to
+        # capture the merged headers; this test pins it.
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="ok")
+
+        scope = ScopePolicy(
+            target_name="anduril-like",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            user_agent="Modus/test (HackerOne:tester)",
+            default_headers={"X-HackerOne-Research": "tester"},
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = HttpExecutor(
+            user_agent=session.scope.user_agent,
+            extra_default_headers=dict(session.scope.default_headers),
+        )
+        executor._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={
+                "User-Agent": session.scope.user_agent,
+                **session.scope.default_headers,
+            },
+        )
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
+        await server._dispatch(
+            "request",
+            {"target": "target.example.com", "method": "GET", "path": "/"},
+        )
+        # The session pool now has one observation; its
+        # request_headers should reflect the wire-level merged set,
+        # not just the (empty) per-request action.headers.
+        assert len(session.observations) == 1
+        captured = session.observations[0].payload.get("request_headers", {})
+        # Names are case-insensitive; httpx normalises to lowercase.
+        lower = {k.lower(): v for k, v in captured.items()}
+        assert lower.get("x-hackerone-research") == "tester", (
+            f"H1 research header missing from audit; captured headers: {captured}"
+        )
+        assert lower.get("user-agent") == "Modus/test (HackerOne:tester)"
+
+    async def test_action_header_overrides_scope_default_header(self) -> None:
+        # Per-request headers from the action take precedence over
+        # the scope default, matching the user_agent precedence
+        # documented in :class:`ScopePolicy`.
+        seen_headers: list[dict[str, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_headers.append(dict(request.headers))
+            return httpx.Response(200, text="ok")
+
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            default_headers={"X-Trace": "scope-default"},
+        )
+        session = ServerSession(scope=scope, llm=None)
+        executor = HttpExecutor(
+            user_agent=session.scope.user_agent,
+            extra_default_headers=dict(session.scope.default_headers),
+        )
+        executor._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={
+                "User-Agent": session.scope.user_agent,
+                **session.scope.default_headers,
+            },
+        )
+        from modus.tool_executor import ToolExecutor
+
+        server = ModusServer(
+            session=session,
+            executor=executor,
+            checker=ConsistencyChecker(scope=session.scope, registry=session.tool_registry),
+            tool_executor=ToolExecutor(session=session, scope=session.scope),
+        )
+        await server._dispatch(
+            "request",
+            {
+                "target": "target.example.com",
+                "method": "GET",
+                "path": "/",
+                "headers": {"X-Trace": "per-request-override"},
+            },
+        )
+        assert len(seen_headers) == 1
+        assert seen_headers[0].get("x-trace") == "per-request-override"
+
 
 class TestHypothesizeTool:
     async def test_accepted_hypothesis_appended_to_session(self) -> None:

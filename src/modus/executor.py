@@ -35,6 +35,15 @@ class HttpObservation:
     operator can later round-trip the session pool into Quarry via
     ``quarry ingest --source responses``.
 
+    ``request_headers`` records the **effective** header set sent on
+    the wire — the merge of httpx client defaults (User-Agent and
+    scope-pinned :attr:`~modus.scope.ScopePolicy.default_headers`)
+    with per-request :attr:`~modus.actions.Request.headers`
+    overrides. This makes the audit record substantive: bug-bounty
+    programs that require an identifying header on every probe
+    (HackerOne's ``X-HackerOne-Research``, Bugcrowd's equivalents)
+    can be verified post-hoc from the audit trail.
+
     ``redirect_chain`` lists every URL the executor followed before
     arriving at the final response — empty when no redirects were
     followed. Useful audit trail when the agent's intended endpoint
@@ -145,14 +154,25 @@ class HttpExecutor:
         current_method = action.method
         request_body: str | None = action.body
         redirect_chain: list[str] = []
+        # The set of headers actually sent over the wire on the most
+        # recent hop, captured via ``build_request`` so client-default
+        # headers (User-Agent, scope-pinned ``default_headers`` like
+        # ``X-HackerOne-Research``) appear merged with per-request
+        # action headers. This is what the audit record stores —
+        # storing only ``action.headers`` would let the audit lie
+        # about what we sent, which matters for bug-bounty programs
+        # that require an identifying header on every probe.
+        effective_request_headers: dict[str, str] = {}
 
         try:
-            response = await self._client.request(
+            request = self._client.build_request(
                 current_method,
                 current_url,
                 headers=request_headers,
                 content=request_body,
             )
+            effective_request_headers = dict(request.headers)
+            response = await self._client.send(request)
             for _ in range(self.max_redirects):
                 if not self.follow_same_origin_redirects:
                     break
@@ -176,19 +196,31 @@ class HttpExecutor:
                     current_method = "GET"
                     request_body = None
                 current_url = next_url
-                response = await self._client.request(
+                request = self._client.build_request(
                     current_method,
                     current_url,
                     headers=request_headers,
                     content=request_body,
                 )
+                effective_request_headers = dict(request.headers)
+                response = await self._client.send(request)
         except httpx.HTTPError as exc:
             elapsed = (time.monotonic() - started) * 1000.0
             return HttpObservation(
                 id=observation_id,
                 url=current_url,
                 method=action.method,
-                request_headers=request_headers,
+                # If ``build_request`` succeeded but ``send`` failed
+                # (the common case — DNS, TLS, connect, timeout),
+                # ``effective_request_headers`` already has the
+                # merged set. If we never got that far,
+                # ``request_headers`` (the per-request slice) is the
+                # best we can record. Either way: never fall back to
+                # an empty dict, since downstream consumers (audit
+                # tooling, evidence_patterns) treat an empty headers
+                # dict as "no headers were sent" rather than "we
+                # didn't capture them."
+                request_headers=effective_request_headers or request_headers,
                 request_body=action.body,
                 status=0,
                 response_headers={},
@@ -204,7 +236,7 @@ class HttpExecutor:
             id=observation_id,
             url=current_url,
             method=action.method,
-            request_headers=request_headers,
+            request_headers=effective_request_headers,
             request_body=action.body,
             status=response.status_code,
             response_headers=dict(response.headers.items()),

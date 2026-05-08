@@ -223,7 +223,7 @@ ToolDeclaration = Annotated[
 class ScopePolicy(BaseModel):
     """Operator-authored scope envelope for a single Modus session.
 
-    Three axes:
+    Four axes:
 
     * **Asset scope** — which hostnames the agent may touch. Each
       entry is either a bare hostname (any scheme/port) or a URL
@@ -242,6 +242,13 @@ class ScopePolicy(BaseModel):
       researcher-identifying header, some forbid bug-bounty UA
       strings). Per-request overrides via the action's ``headers``
       take precedence over this default.
+    * **Default headers** — additional headers pinned on every
+      outbound request. Bug-bounty programs commonly require a
+      researcher-identifying header on every probe (e.g.
+      HackerOne's ``X-HackerOne-Research: <h1-username>``); pinning
+      it here means the agent cannot accidentally omit it. The
+      action's per-request ``headers`` take precedence over these
+      defaults when the same header name is set both places.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -252,6 +259,13 @@ class ScopePolicy(BaseModel):
         default_factory=lambda: frozenset({"GET", "HEAD", "OPTIONS"})
     )
     user_agent: str = Field(default=DEFAULT_USER_AGENT, min_length=1, max_length=512)
+    default_headers: dict[str, str] = Field(default_factory=dict)
+    """Headers pinned on every outbound request the executor sends.
+    Use for bug-bounty researcher-identifying headers (HackerOne,
+    Bugcrowd, intigriti) the program requires on every probe.
+    Per-request action headers override these by name. The
+    User-Agent is set separately via :attr:`user_agent` and should
+    not be duplicated here."""
     tools: tuple[ToolDeclaration, ...] = ()
     """Operator-declared tools to register on top of Modus's
     builtin set. Each entry is a shell or MCP-passthrough
@@ -277,6 +291,36 @@ class ScopePolicy(BaseModel):
         unknown = value - known
         if unknown:
             raise ValueError(f"unknown HTTP method(s) in scope: {sorted(unknown)}")
+        return value
+
+    @field_validator("default_headers")
+    @classmethod
+    def _validate_default_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        # RFC 7230 token chars for header names: alphanum plus the
+        # punctuation set below. Reject anything outside that — it'd
+        # just blow up at the httpx layer with a less-clear error.
+        token_punct = set("!#$%&'*+-.^_`|~")
+        for name, header_value in value.items():
+            if not name:
+                raise ValueError("header name must be non-empty")
+            for ch in name:
+                if not (ch.isalnum() or ch in token_punct):
+                    raise ValueError(
+                        f"invalid character {ch!r} in header name {name!r}; "
+                        f"RFC 7230 token chars only"
+                    )
+            if name.lower() == "user-agent":
+                # Operators set the UA via :attr:`user_agent`. Allowing
+                # both surfaces would let the two disagree silently;
+                # force the canonical path.
+                raise ValueError("set User-Agent via ScopePolicy.user_agent, not default_headers")
+            if not header_value:
+                raise ValueError(f"header value must be non-empty for {name!r}")
+            if "\r" in header_value or "\n" in header_value:
+                raise ValueError(
+                    f"header value for {name!r} must not contain CR/LF "
+                    f"(would enable header injection)"
+                )
         return value
 
     def endpoints(self) -> tuple[AllowedEndpoint, ...]:
