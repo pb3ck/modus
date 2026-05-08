@@ -122,25 +122,91 @@ chose (e.g. `modus.run_autonomous_session`).
 
 ## 4. Run an autonomous session
 
+### 4a. (Optional but strongly recommended) Seed the run with recon
+
+The autonomous loop reasons over a *corpus*. On a cold corpus
+with no assets ingested, the agent has nothing to anchor against
+and tends to thrash on guessed paths. Doing recon first — even
+a small probe sweep — gives the agent real evidence to commit
+hypotheses against, and is what makes mid-size local models
+(qwen2.5-coder:14b, phi4:14b) reach `hypothesize` reliably
+instead of exploring indefinitely.
+
+The recon output should be a JSONL file of
+`{url, status, headers, body}` records — the same shape Quarry's
+`responses` ingest adapter accepts. A 30-line Python script with
+`aiohttp` covers it:
+
+```python
+# /tmp/seed.py
+import asyncio, json, aiohttp
+PATHS = [
+    "/", "/robots.txt", "/api-docs",
+    "/rest/admin/application-version",
+    "/api/Users", "/api/Feedbacks", "/rest/products/search?q=apple",
+    # ... whatever paths matter for your target
+]
+async def main():
+    async with aiohttp.ClientSession() as s:
+        with open("/tmp/recon.jsonl", "w") as f:
+            for p in PATHS:
+                async with s.get(f"http://localhost:13000{p}") as r:
+                    f.write(json.dumps({
+                        "url": str(r.url), "status": r.status,
+                        "headers": dict(r.headers),
+                        "body": (await r.read()).decode("utf-8", "replace")[:256_000],
+                    }) + "\n")
+asyncio.run(main())
+```
+
+Then ingest it into Quarry so the corpus has assets / evidence /
+artifacts to reason over:
+
+```sh
+quarry ingest --target juice-shop --source responses /tmp/recon.jsonl
+```
+
+`quarry status` should now show non-zero `assets`, `runs`,
+`artifacts`, `evidence`. (Real engagements would use `httpx`,
+`katana`, or Burp output via the matching ingest sources; the
+JSONL form above is just the simplest path to get started.)
+
+### 4b. Run the loop
+
 In a Claude Desktop conversation:
 
-> Use Modus to look for IDOR vulnerabilities on the juice-shop
-> target. Run an autonomous session with budget max_steps=15.
+> Use Modus to look for IDOR or info-disclosure vulnerabilities
+> on the juice-shop target. Pass `recon_jsonl_path` =
+> `/tmp/recon.jsonl` so the loop seeds its evidence pool from
+> the recon I just did. Budget max_steps=25.
 
 The host's LLM will call `modus.run_autonomous_session` with the
-target name from your scope, the bug class, and a budget. Modus
-runs the propose-prune-rank-execute loop end-to-end — sampling
-candidate actions from the host's LLM, Z3-pruning the inconsistent
-ones, executing the survivors via its HTTP executor, accumulating
-observations and Candidates in the session pool. The tool returns
-a structured `SessionRecord` with every sampled proposal, every
-Z3 verdict, every executed action, and any Candidates the agent
-authored.
+target name, the bug classes, the budget, and the
+`recon_jsonl_path`. Modus reads the JSONL, materializes one
+`SessionObservation` per record into the run's evidence pool
+(so the agent can cite them in `hypothesize` actions and the
+deterministic fallback proposer can pattern-match against them),
+then runs the propose-prune-rank-execute loop end-to-end —
+sampling candidate actions from the host's LLM (or Modus's
+configured provider), Z3-pruning the inconsistent ones,
+executing the survivors via its HTTP executor, accumulating
+observations and Candidates in the session pool. The tool
+returns a structured `SessionRecord` with every sampled
+proposal, every Z3 verdict, every executed action, any
+Candidates the agent authored, and any Findings the loop
+auto-promoted.
 
-Expect the session to take 1–5 minutes for a 15-step budget,
+The result also reports `seeded_observation_count` so you can
+verify the recon JSONL was loaded; if the path was wrong or
+unreadable the result includes a `recon_warning` explaining why
+no observations were seeded.
+
+Expect the session to take 5–20 minutes for a 25-step budget,
 mostly LLM round-trip latency. The host's UX during the call is
 "tool in progress"; you can keep reading the conversation while
-it runs.
+it runs. For longer runs, use `start_autonomous_session` +
+`poll_autonomous_session` (escapes the host's per-tool-call
+timeout).
 
 ## 5. Read the result and review the Findings
 
