@@ -373,6 +373,81 @@ class TestFallbackProposer:
         hyp = next(a for a in executor.calls if a.kind == "hypothesize")
         assert seed_id in hyp.evidence_refs
 
+    async def test_fallback_does_not_leak_prior_run_observations(self) -> None:
+        """Regression: the fallback proposer's input must respect the
+        per-run observation pool. ``self.session.observations`` is
+        process-lifetime — observations accumulate across multiple
+        ``run_autonomous_session`` calls within one Modus process.
+        A previous version of ``_this_run_observations`` returned
+        the full pool, which let the fallback synthesize a
+        ``Hypothesize`` whose ``evidence_refs`` cited an
+        observation produced by an *earlier* autonomous-session
+        call — violating the run-pool isolation invariant from
+        v0.1.0 issue #4. Surfaced 2026-05-08 in a juice-shop
+        engagement when a Candidate referenced an observation ID
+        timestamped from a prior session.
+        """
+        from modus.session import SessionObservation
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        # Two pattern-matching observations live in
+        # session.observations: one from a "prior run" (NOT in this
+        # run's pool) and one from "this run" (in the pool).
+        prior_run_id = "obs-prior-run-version"
+        this_run_id = "obs-this-run-version"
+        for obs_id, body in (
+            (prior_run_id, '{"version":"1.0.0-prior"}'),
+            (this_run_id, '{"version":"2.0.0-current"}'),
+        ):
+            session.observations.append(
+                SessionObservation(
+                    id=obs_id,
+                    kind="request",
+                    payload={
+                        "url": f"http://target.example.com/{obs_id}",
+                        "status": 200,
+                        "response_body": body,
+                        "request_headers": {},
+                    },
+                )
+            )
+        # FixedProposer never hypothesizes — forces the fallback to
+        # be the only path that emits a hypothesize action.
+        proposer = FixedProposer([Probe(target="target.example.com")] * 20)
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=8, max_consecutive_empty_steps=10),
+        )
+        # Only THIS-RUN's observation is in initial_observation_ids;
+        # the prior-run obs lives in session.observations but isn't
+        # in the run pool.
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            initial_observation_ids=frozenset({this_run_id}),
+        )
+        # Every executed hypothesize's evidence_refs must come from
+        # this run's pool only — the prior-run obs must not leak in.
+        hypothesizes = [a for a in executor.calls if a.kind == "hypothesize"]
+        assert hypothesizes, (
+            "expected the fallback to synthesize at least one hypothesize "
+            "against this-run's evidence; got none"
+        )
+        for hyp in hypothesizes:
+            assert prior_run_id not in hyp.evidence_refs, (
+                f"fallback leaked prior-run observation {prior_run_id!r} into "
+                f"a hypothesize emitted in a later run; evidence_refs={hyp.evidence_refs}"
+            )
+
     async def test_seed_from_corpus_loads_response_artifacts(self) -> None:
         """When ``seed_from_corpus=True`` (the default), the loop
         calls ``list_response_artifacts`` on session.with_quarry()

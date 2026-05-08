@@ -277,6 +277,7 @@ class AgentLoop:
                 synthesized_keys=synthesized_keys,
                 pending_promotions=pending_promotions,
                 synthesized_promotion_ids=synthesized_promotion_ids,
+                run_observation_ids=frozenset(run_observations),
             )
             # Prepend fallbacks so they win the "first novel survivor"
             # ranking when both fire — the fallback only emits when the
@@ -520,6 +521,7 @@ class AgentLoop:
         synthesized_keys: set[str],
         pending_promotions: list[tuple[str, str]],
         synthesized_promotion_ids: set[str],
+        run_observation_ids: frozenset[str],
     ) -> list[Action]:
         """Synthesize fallback proposals when the LLM keeps abdicating.
 
@@ -582,7 +584,7 @@ class AgentLoop:
             if steps_since_last <= self.FALLBACK_QUIET_AFTER_HYPOTHESIZE:
                 return out
 
-        observations = self._this_run_observations()
+        observations = self._this_run_observations(run_observation_ids)
         if not observations:
             return out
         matches = detect_evidence_patterns(observations, bug_classes)
@@ -616,22 +618,30 @@ class AgentLoop:
             out.append(action)
         return out
 
-    def _this_run_observations(self) -> list[SessionObservation]:
+    def _this_run_observations(
+        self, run_observation_ids: frozenset[str]
+    ) -> list[SessionObservation]:
         """The session's observations whose ids are in the run pool.
 
-        The run pool (the per-run observation IDs the loop tracks)
-        intersects with ``session.observations`` to yield the
-        full :class:`SessionObservation` records this run produced —
-        what the fallback detectors pattern-match against.
+        Filters ``self.session.observations`` (the process-lifetime
+        pool, which accumulates across multiple
+        ``run_autonomous_session`` calls within one Modus process
+        and across calls to the verified-action surface) down to
+        just the ones produced *this run*. The run pool is the
+        set the loop builds up step-by-step plus any caller-
+        supplied ``initial_observation_ids`` and corpus seeds.
+
+        Pinned by the per-run observation isolation invariant from
+        v0.1.0 issue #4 — Hypothesize is gated on
+        ``state.session_observations`` (the per-run set) at the
+        consistency layer; the fallback proposer's input must
+        respect the same gate or it can synthesize Hypothesize
+        actions citing prior-run observations the agent never
+        produced. Surfaced 2026-05-08 by an Anduril/juice-shop
+        engagement when a fallback Candidate cited an observation
+        ID timestamped from a previous Modus session.
         """
-        # Note: the loop builds run_observations as a local set;
-        # we don't have direct access here, so we pull from the
-        # session's full pool and let the detectors filter on
-        # their own structural rules. The session's pool only
-        # accumulates this-run observations within a single
-        # ``run_autonomous_session`` call (the verified-action
-        # surface appends too, but that's outside this loop).
-        return list(self.session.observations)
+        return [obs for obs in self.session.observations if obs.id in run_observation_ids]
 
     def _recent_action_keys(self, steps: list[StepRecord]) -> set[str]:
         """Set of dedup keys for actions executed in the last few steps.
