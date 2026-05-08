@@ -209,6 +209,9 @@ class TestSessionRecordSerialisation:
         assert payload["bug_classes"] == ["idor"]
         assert payload["step_count"] == 1
         assert payload["executed_count"] == 1
+        # The corpus-auto-load count flows through the audit record.
+        # Default 0 when no observations were seeded from Quarry.
+        assert payload["corpus_seeded_observation_count"] == 0
 
 
 class TestEvidenceRefsScopedToRun:

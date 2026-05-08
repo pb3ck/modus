@@ -613,6 +613,119 @@ class TestAutonomousToolGate:
         assert "error" in result
 
 
+class TestFindingsPromotedHelper:
+    """``_extract_promoted_findings`` pulls auto-promoted Findings
+    out of the SessionRecord's tool steps so the autonomous-session
+    result payload can surface them without a Quarry round-trip."""
+
+    def test_extracts_finding_from_corpus_promote_finding_step(self) -> None:
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from modus.actions import Tool
+        from modus.agent import SessionRecord, StepRecord
+        from modus.consistency import Verdict
+        from modus.server import _extract_promoted_findings
+
+        promote = Tool(
+            name="corpus.promote_finding",
+            args={"candidate_id": "cand-1", "severity": "high"},
+        )
+        record = SessionRecord(
+            target_name="demo",
+            bug_classes=("idor",),
+            started_at=_dt.now(UTC),
+            steps=[
+                StepRecord(
+                    step_index=0,
+                    started_at=_dt.now(UTC),
+                    proposals=(promote,),
+                    verdicts=(Verdict(accepted=True, rationale="ok"),),
+                    executed=(promote,),
+                    execution_results=(
+                        {
+                            "observation_id": "tool-1",
+                            "tool_name": "corpus.promote_finding",
+                            "builtin_result": {
+                                "finding_id": "fid-1",
+                                "candidate_id": "cand-1",
+                                "severity": "high",
+                                "title": "/admin/users unauth",
+                                "status": "hypothesis",
+                            },
+                        },
+                    ),
+                ),
+            ],
+        )
+        out = _extract_promoted_findings(record)
+        assert len(out) == 1
+        assert out[0]["finding_id"] == "fid-1"
+        assert out[0]["severity"] == "high"
+
+    def test_returns_empty_list_when_no_promotions(self) -> None:
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from modus.actions import Probe
+        from modus.agent import SessionRecord, StepRecord
+        from modus.consistency import Verdict
+        from modus.server import _extract_promoted_findings
+
+        probe = Probe(target="target.example.com")
+        record = SessionRecord(
+            target_name="demo",
+            bug_classes=(),
+            started_at=_dt.now(UTC),
+            steps=[
+                StepRecord(
+                    step_index=0,
+                    started_at=_dt.now(UTC),
+                    proposals=(probe,),
+                    verdicts=(Verdict(accepted=True, rationale="ok"),),
+                    executed=(probe,),
+                    execution_results=({"aspect": "endpoints", "hits": []},),
+                ),
+            ],
+        )
+        assert _extract_promoted_findings(record) == []
+
+    def test_skips_non_promote_tool_calls(self) -> None:
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from modus.actions import Tool
+        from modus.agent import SessionRecord, StepRecord
+        from modus.consistency import Verdict
+        from modus.server import _extract_promoted_findings
+
+        # A different Tool action — not corpus.promote_finding.
+        amass = Tool(name="amass.enum", args={"domain": "target.example.com"})
+        record = SessionRecord(
+            target_name="demo",
+            bug_classes=(),
+            started_at=_dt.now(UTC),
+            steps=[
+                StepRecord(
+                    step_index=0,
+                    started_at=_dt.now(UTC),
+                    proposals=(amass,),
+                    verdicts=(Verdict(accepted=True, rationale="ok"),),
+                    executed=(amass,),
+                    execution_results=(
+                        {
+                            "observation_id": "tool-1",
+                            "tool_name": "amass.enum",
+                            "shell_result": {"stdout": "..."},
+                        },
+                    ),
+                ),
+            ],
+        )
+        # No corpus.promote_finding step, so no findings extracted.
+        assert _extract_promoted_findings(record) == []
+
+
 class TestReconJsonlSeeding:
     """The autonomous-session MCP tools accept a ``recon_jsonl_path``
     argument that materializes a `responses`-shape JSONL into the
