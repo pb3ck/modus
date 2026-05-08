@@ -376,6 +376,96 @@ class TestAnalyze:
             await client.analyze_regression()
 
 
+class TestCreateCandidate:
+    @staticmethod
+    def _payload(
+        *,
+        candidate_id: str = "cand-1",
+        target_id: str = "tgt-1",
+        module: str = "agent_hypothesize",
+        key: str = "auth_bypass:obs-1,obs-2",
+        score: float = 0.85,
+        rationale: str = "200 → 200 across identity dimension",
+        evidence_refs: list[str] | None = None,
+        was_new: bool = True,
+        created_at: str = "2026-05-07T22:30:00Z",
+    ) -> dict[str, Any]:
+        return {
+            "candidate_id": candidate_id,
+            "target_id": target_id,
+            "module": module,
+            "key": key,
+            "score": score,
+            "rationale": rationale,
+            "evidence_refs": evidence_refs or [],
+            "was_new": was_new,
+            "created_at": created_at,
+        }
+
+    async def test_returns_candidate_dataclass(self) -> None:
+        session = _FakeSession(responses={"candidate_create": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        result = await client.create_candidate(
+            target="alpha",
+            module="agent_hypothesize",
+            key="auth_bypass:obs-1,obs-2",
+            rationale="200 → 200 across identity dimension",
+            score=0.85,
+        )
+        assert isinstance(result, Candidate)
+        assert result.id == "cand-1"
+        assert result.module == "agent_hypothesize"
+        assert result.score == pytest.approx(0.85)
+        assert result.was_new is True
+
+    async def test_passes_args_through(self) -> None:
+        session = _FakeSession(responses={"candidate_create": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.create_candidate(
+            target="alpha",
+            module="agent_hypothesize",
+            key="k",
+            rationale="r",
+            score=0.7,
+            evidence_refs=("ev-1", "ev-2"),
+        )
+        assert session.calls == [
+            (
+                "candidate_create",
+                {
+                    "target": "alpha",
+                    "module": "agent_hypothesize",
+                    "key": "k",
+                    "rationale": "r",
+                    "score": 0.7,
+                    "evidence_refs": ["ev-1", "ev-2"],
+                },
+            ),
+        ]
+
+    async def test_omits_optional_fields_when_unset(self) -> None:
+        session = _FakeSession(responses={"candidate_create": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.create_candidate(
+            target="alpha", module="agent_hypothesize", key="k", rationale="r"
+        )
+        # Score and evidence_refs must NOT appear when omitted —
+        # Quarry defaults score to 0.5 and evidence_refs to [] server-side.
+        args = session.calls[0][1]
+        assert "score" not in args
+        assert "evidence_refs" not in args
+
+    async def test_malformed_payload_raises_schema_error(self) -> None:
+        broken = self._payload()
+        del broken["candidate_id"]
+        session = _FakeSession(responses={"candidate_create": _text_result(broken)})
+        client = QuarryMcpClient.from_session(session)
+        with pytest.raises(CorpusSchemaError):
+            await client.create_candidate(
+                target="alpha", module="agent_hypothesize", key="k", rationale="r"
+            )
+
+
 class TestPromoteFinding:
     @staticmethod
     def _payload(
@@ -586,3 +676,18 @@ class TestStubCorpusClient:
             candidate_id="cand-9", severity="medium", title="manual title"
         )
         assert result.title == "manual title"
+
+    async def test_create_candidate_returns_deterministic_candidate(self) -> None:
+        stub = StubCorpusClient()
+        result = await stub.create_candidate(
+            target="alpha",
+            module="agent_hypothesize",
+            key="auth_bypass:obs-1",
+            rationale="reasoning here",
+            score=0.85,
+        )
+        assert isinstance(result, Candidate)
+        assert result.id == "candidate-agent_hypothesize-auth_bypass:obs-1"
+        assert result.module == "agent_hypothesize"
+        assert result.score == pytest.approx(0.85)
+        assert result.was_new is True

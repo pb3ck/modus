@@ -469,29 +469,25 @@ def _promote_finding_preconditions(
     args: dict[str, Any], scope: ScopePolicy, state: CorpusState
 ) -> list[tuple[str, bool]]:
     """Gate ``corpus.promote_finding`` on the candidate id being
-    referenced by something in this run's observation pool.
+    one this run produced via ``hypothesize``.
 
     Cross-run bleed is structurally undesirable: an autonomous run
-    should only promote Candidates that *this* run observed enough
-    to vouch for. The check is "candidate_id matches one of the
-    Candidates this run authored via :class:`Hypothesize` or that
-    came back from a same-run :class:`Tool` invocation of an
-    ``analyze_*`` tool". We approximate that with
-    ``state.known_evidence`` membership — Hypothesize calls always
-    add the new Candidate's id to ``known_evidence`` (per #4), and
-    a same-run analyze_*-produced Candidate id flows through the
-    same pool when its observation lands.
+    should only promote Candidates *this* run authored. Operators
+    who want cross-run promotion run ``quarry finding promote``
+    from the CLI, which Modus does not gate.
 
-    If the registered Candidate id wasn't seen this run, the
-    promotion is structurally rejected. Operators who explicitly
-    want cross-run promotion run ``quarry finding promote`` from
-    the CLI, which Modus does not gate.
+    The agent loop populates ``state.run_candidates`` from
+    Quarry-returned candidate ids each time a ``hypothesize``
+    action executes (see ``AgentLoop.run`` and
+    ``ModusServer._execute_action``'s Hypothesize branch). If the
+    referenced candidate id isn't in that set, the promotion is
+    structurally rejected before dispatch.
     """
     candidate_id = str(args.get("candidate_id", ""))
     return [
         (
             f"promote_candidate_in_run_pool:{candidate_id}",
-            candidate_id in state.known_evidence,
+            candidate_id in state.run_candidates,
         ),
     ]
 

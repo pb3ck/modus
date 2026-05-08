@@ -92,6 +92,17 @@ class CorpusState:
         ``known_observations`` pool that aren't here are bleed.
 
     Populated by :meth:`AgentLoop._step_context`."""
+    run_candidates: frozenset[str] = field(default_factory=frozenset)
+    """Quarry Candidate IDs produced by ``hypothesize`` actions
+    *in the current autonomous run*.
+
+    Used by ``corpus.promote_finding``'s precondition to gate
+    promotion on the candidate id appearing in this run's pool —
+    cross-run promotion is the operator's ``quarry finding
+    promote`` CLI verb, not the agent's. Empty by default and on
+    non-autonomous paths; populated by :meth:`AgentLoop.run`
+    each time a hypothesize executes and Quarry returns a
+    ``candidate_id``."""
 
     @classmethod
     def empty(cls) -> CorpusState:

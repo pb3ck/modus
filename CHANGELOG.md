@@ -39,6 +39,31 @@ notice.
   `modus.builtins.corpus.promote_finding`; the six typed-action
   callables (`probe`, `request`, etc.) remain stub paths
   pending the registry-dispatch migration.
+- **`hypothesize` action persists to Quarry.** The action
+  handler in `ModusServer._execute_action` now writes the
+  agent-authored Candidate to Quarry's corpus via the new
+  `QuarryMcpClient.create_candidate` (Quarry MCP write tool
+  `candidate_create`, requires Quarry ≥ candidate_create). The
+  Candidate's `module` is `agent_hypothesize`; the dedup `key`
+  is `<bug_class>:<sorted_evidence_refs>` so re-emitting the
+  same hypothesis upserts in place; the `score` maps the
+  `severity_hint` onto a monotone scale (info=0.1 … critical=0.95)
+  for sort order within the module's output. The action result
+  now includes `candidate_id` (Quarry-resolvable UUID), enabling
+  next-step `corpus.promote_finding`. Older Quarry servers
+  return `candidate_id=null` and a `persistence_error` field
+  rather than failing the action.
+- **`QuarryMcpClient.create_candidate(...)`** — async method
+  wrapping the MCP `candidate_create` call. Added to the
+  `CorpusClient` Protocol; `StubCorpusClient.create_candidate`
+  returns a deterministic `Candidate` for tests.
+  `candidate_create` joins `OPTIONAL_TOOLS`.
+- **`CorpusState.run_candidates`** — frozenset of Candidate ids
+  produced by `hypothesize` actions in the current autonomous
+  run. Populated by `AgentLoop.run` from each step's result
+  payload; consumed by `_promote_finding_preconditions` (now
+  fixed to gate on the right pool — was checking
+  `state.known_evidence`, which `hypothesize` doesn't populate).
 
 ### Changed
 

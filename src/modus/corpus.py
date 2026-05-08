@@ -271,6 +271,17 @@ class CorpusClient(Protocol):
         title: str | None = None,
     ) -> Finding: ...
 
+    async def create_candidate(
+        self,
+        *,
+        target: str,
+        module: str,
+        key: str,
+        rationale: str,
+        score: float | None = None,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> Candidate: ...
+
 
 class _SessionProtocol(Protocol):
     """The slice of :class:`mcp.ClientSession` this module uses.
@@ -337,6 +348,13 @@ class QuarryMcpClient:
             # running an old Quarry sees a clear "upgrade Quarry to
             # promote Findings" message rather than a session refuse.
             "finding_promote",
+            # ``candidate_create`` shipped in Quarry post-finding_promote;
+            # older corpus servers don't expose it. Same lifecycle as
+            # finding_promote — connect anyway, surface the absence at
+            # call time so an operator running an old Quarry sees a clear
+            # "upgrade Quarry to author Candidates from agent reasoning"
+            # message rather than a session refuse.
+            "candidate_create",
         }
     )
 
@@ -635,6 +653,61 @@ class QuarryMcpClient:
     async def analyze_interesting(self, *, target: str | None = None) -> list[Candidate]:
         return await self._analyze("analyze_interesting", target=target)
 
+    # --- agent-authored Candidate persistence (writes a Candidate) ----
+
+    async def create_candidate(
+        self,
+        *,
+        target: str,
+        module: str,
+        key: str,
+        rationale: str,
+        score: float | None = None,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> Candidate:
+        """Persist an agent-authored Candidate to the corpus.
+
+        Mirrors Quarry's MCP ``candidate_create`` write tool.
+        ``target`` is a target name (preferred) or a full UUID;
+        ``module`` is conventionally ``"agent_hypothesize"`` for
+        Modus-authored Candidates so the dedup space doesn't
+        collide with Quarry's analytical modules; ``key`` is a
+        deterministic dedup key per ``(module, target_id)`` —
+        re-emitting the same triple upserts in place rather than
+        duplicating. ``score`` defaults to 0.5 server-side when
+        omitted. ``evidence_refs`` entries must be valid UUIDs;
+        callers without Quarry-resolvable evidence ids pass an
+        empty tuple.
+
+        Returns the upserted ``Candidate``. Re-emission produces
+        a row with ``was_new=False`` and the same id as the
+        previous emission with the matching triple.
+        """
+        args: dict[str, Any] = {
+            "target": target,
+            "module": module,
+            "key": key,
+            "rationale": rationale,
+        }
+        if score is not None:
+            args["score"] = score
+        if evidence_refs:
+            args["evidence_refs"] = list(evidence_refs)
+        payload = await self._call("candidate_create", args)
+        try:
+            return Candidate(
+                id=str(payload["candidate_id"]),
+                target_id=str(payload["target_id"]),
+                module=str(payload["module"]),
+                key=str(payload["key"]),
+                score=float(payload["score"]),
+                rationale=str(payload["rationale"]),
+                evidence_refs=tuple(payload.get("evidence_refs", [])),
+                was_new=bool(payload.get("was_new", False)),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CorpusSchemaError(f"candidate_create payload malformed: {exc}") from exc
+
     # --- Candidate→Finding promotion (writes a Finding) ---------------
 
     async def promote_finding(
@@ -869,6 +942,30 @@ class StubCorpusClient:
             title=title or f"stub finding for {candidate_id}",
             status="hypothesis",
             created_at="1970-01-01T00:00:00Z",
+        )
+
+    async def create_candidate(
+        self,
+        *,
+        target: str,
+        module: str,
+        key: str,
+        rationale: str,
+        score: float | None = None,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> Candidate:
+        # Deterministic stand-in: id derived from (module, key) so
+        # tests can predict the upserted candidate's id without
+        # mocking the storage layer.
+        return Candidate(
+            id=f"candidate-{module}-{key}",
+            target_id=f"target-of-{target}",
+            module=module,
+            key=key,
+            score=0.5 if score is None else score,
+            rationale=rationale,
+            evidence_refs=tuple(evidence_refs),
+            was_new=True,
         )
 
 

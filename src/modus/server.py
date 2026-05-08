@@ -55,7 +55,7 @@ from modus.actions import (
     Tool,
 )
 from modus.consistency import ConsistencyChecker, Verdict
-from modus.corpus import CorpusClient, CorpusError
+from modus.corpus import CorpusClient, CorpusError, CorpusToolsMissingError
 from modus.executor import HttpExecutor
 from modus.proposer import make_proposer
 from modus.session import AsyncSession, ServerSession, SessionCandidate, SessionObservation
@@ -535,19 +535,50 @@ class ModusServer:
             )
             return {"observation_id": obs_id, "referent": action.referent}
         if isinstance(action, Hypothesize):
-            self.session.candidates.append(
-                SessionCandidate(
-                    bug_class=action.bug_class,
-                    evidence_refs=action.evidence_refs,
-                    rationale=action.rationale,
-                    severity_hint=action.severity_hint,
-                )
+            session_candidate = SessionCandidate(
+                bug_class=action.bug_class,
+                evidence_refs=action.evidence_refs,
+                rationale=action.rationale,
+                severity_hint=action.severity_hint,
             )
-            return {
-                "candidate_index": len(self.session.candidates) - 1,
+            self.session.candidates.append(session_candidate)
+            session_index = len(self.session.candidates) - 1
+            # Persist to Quarry so the autonomous loop's next-step
+            # ``corpus.promote_finding`` can resolve a real Candidate
+            # id. Older Quarry servers don't expose ``candidate_create``;
+            # we surface the absence as a ``candidate_id`` of ``None``
+            # in the result rather than failing the hypothesize itself,
+            # so the autonomous loop still records the SessionCandidate
+            # for operator review even when the corpus can't store it.
+            candidate_id: str | None = None
+            persistence_error: str | None = None
+            try:
+                async with self.session.with_quarry() as quarry:
+                    persisted = await quarry.create_candidate(
+                        target=self.session.scope.target_name,
+                        module="agent_hypothesize",
+                        key=_hypothesize_dedup_key(action),
+                        rationale=action.rationale,
+                        score=_severity_to_score(action.severity_hint),
+                    )
+                    candidate_id = persisted.id
+            except CorpusToolsMissingError as exc:
+                persistence_error = (
+                    "Quarry does not expose ``candidate_create`` — "
+                    f"upgrade Quarry to author Candidates from agent reasoning ({exc})"
+                )
+            except CorpusError as exc:
+                persistence_error = f"candidate persistence failed: {exc}"
+            result: dict[str, Any] = {
+                "candidate_index": session_index,
+                "candidate_id": candidate_id,
                 "bug_class": action.bug_class,
                 "rationale": action.rationale,
+                "severity_hint": action.severity_hint,
             }
+            if persistence_error is not None:
+                result["persistence_error"] = persistence_error
+            return result
         if isinstance(action, Tool):
             spec = self.session.tool_registry.get(action.name)
             if spec is None:
@@ -1169,6 +1200,40 @@ async def serve(scope_path: Path) -> int:
                 with suppress(asyncio.CancelledError, Exception):
                     await warmup_task
     return 0
+
+
+def _hypothesize_dedup_key(action: Hypothesize) -> str:
+    """Deterministic dedup key for an agent-authored Candidate.
+
+    Quarry's ``candidate_create`` upserts by ``(target_id, module,
+    key)``. Re-emitting the same hypothesize action — same bug
+    class against the same evidence — should refresh the existing
+    Candidate row, not create a duplicate. The key shape is
+    ``"<bug_class>:<sorted_evidence_refs>"``: stable across
+    restarts, distinct across genuinely different hypotheses.
+    """
+    sorted_refs = ",".join(sorted(action.evidence_refs))
+    return f"{action.bug_class}:{sorted_refs}"
+
+
+def _severity_to_score(severity_hint: str | None) -> float:
+    """Map ``severity_hint`` to a Quarry Candidate ``score`` in [0,1].
+
+    The Candidate ``score`` is module-defined and Quarry's
+    analytical modules use it to sort within a module's output.
+    For agent-authored Candidates we map severity tiers into a
+    monotone scale so a critical hypothesis sorts above an info
+    one when both come from ``agent_hypothesize``. The mapping
+    is intentionally coarse — score isn't the contract surface
+    here, severity_hint on the Candidate's downstream Finding is.
+    """
+    return {
+        "critical": 0.95,
+        "high": 0.8,
+        "medium": 0.6,
+        "low": 0.3,
+        "info": 0.1,
+    }.get(severity_hint or "", 0.5)
 
 
 __all__ = ["ModusServer", "serve"]
