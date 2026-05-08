@@ -338,11 +338,129 @@ _VERSION_BANNER_RE = re.compile(
     r'"(version|build|release|commit|sha)"\s*:\s*"([^"]{1,80})"',
     re.IGNORECASE,
 )
-_SECRET_HINT_RE = re.compile(
-    r"(BEGIN [A-Z ]*PRIVATE KEY|api[_-]?key|secret|password|"
-    r"bearer\s+[A-Za-z0-9._\-]+|aws_access_key|"
-    r"-----BEGIN|client_secret)",
+
+# --- Secret detection ----------------------------------------------------
+#
+# The 2026-05-08 Anduril tool-validation run exposed that bare-keyword
+# substring matching on words like ``password`` and ``secret`` fires on
+# every HTML login form on the internet (form attributes
+# ``<input name="password">`` etc. are not credential leaks). The
+# detector now splits into three layers:
+#
+#   1. **Concrete-shape**: PEM private keys, AWS access keys, GitHub
+#      and Slack tokens — these have unambiguous structural shapes
+#      and don't need surrounding-keyword context. Critical severity.
+#
+#   2. **Keyword + value**: a credential keyword (api_key, password,
+#      client_secret, etc.) followed by a JSON/form value-assignment
+#      shape (``: "value"`` or ``= value``) where the value is
+#      substantive (≥16 chars) and not a known placeholder. High
+#      severity. Rejects matches inside HTML form attribute names
+#      (e.g. ``<input name="password">``) by checking the preceding
+#      context for an attribute-assignment pattern.
+#
+#   3. **Bearer + token**: ``Bearer <token>`` with the token at least
+#      20 chars and non-placeholder. High severity.
+
+_PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+# AWS access-key-id prefixes per AWS docs (AKIA = long-term, ASIA =
+# session, AROA = role, AIDA = IAM user, etc.). The 16-char body
+# is the standard length.
+_AWS_KEY_ID_RE = re.compile(r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b")
+# GitHub tokens use ghp_ (personal), ghs_ (server-to-server), gho_
+# (OAuth user-to-server), ghu_ (user-to-server), ghr_ (refresh).
+_GH_TOKEN_RE = re.compile(r"\bgh[psour]_[A-Za-z0-9_]{36,}\b")
+# Slack legacy tokens (xox[abprs]-) — see api.slack.com docs.
+_SLACK_TOKEN_RE = re.compile(r"\bxox[abprs]-[0-9a-zA-Z-]{10,}\b")
+
+# Placeholder values that look secret-shaped but obviously aren't.
+# Substring-based against the value, case-insensitively. The
+# substring approach (rather than \b word-boundary) is deliberate:
+# regex \b doesn't fire between `_` and a letter (since `_` is a
+# word char), so doc fixtures like ``test_example_dummy_value``
+# would slip past a word-boundary check on ``example``. The
+# false-negative class — real secrets containing the literal
+# substring ``example`` (or ``your`` / ``placeholder``) — is
+# vanishingly rare for credentials of any meaningful entropy.
+_PLACEHOLDER_SUBSTRINGS = (
+    "your",
+    "placeholder",
+    "example",
+    "todo",
+    "tbd",
+    "changeme",
+    "change-me",
+    "change_me",
+    "...",
+)
+_PLACEHOLDER_FULL_VALUES = frozenset(
+    {
+        "test",
+        "fake",
+        "dummy",
+        "sample",
+        "demo",
+        "null",
+        "undefined",
+        "none",
+        "nil",
+    }
+)
+
+
+def _is_placeholder_value(value: str) -> bool:
+    """True if ``value`` looks like a documentation placeholder rather than a real secret.
+
+    Caller has already pre-filtered to substrings that look
+    secret-shaped (16+ alphanumeric chars). This filter rejects:
+
+    * Standalone placeholder keywords (``test``, ``demo``, etc.)
+    * Values containing common placeholder markers as substrings
+      (``your``, ``example``, ``placeholder``, ``todo``).
+    * Template-shaped values (``<YOUR_KEY>``, ``${API_KEY}``).
+    * Repetitive single-character runs (``xxxxxx``, ``******``).
+    """
+    v = value.strip().lower()
+    if v in _PLACEHOLDER_FULL_VALUES:
+        return True
+    if any(tok in v for tok in _PLACEHOLDER_SUBSTRINGS):
+        return True
+    # Template tag: <FOO>
+    if v.startswith("<") and v.endswith(">"):
+        return True
+    # Template variable: ${FOO}
+    if v.startswith("${") and v.endswith("}"):
+        return True
+    # Single repeated character ("xxxxxxxx", "********", etc.)
+    return len(set(v)) <= 2
+
+
+# Credential keyword + value-assignment. Two flavours captured:
+#
+#   - JSON / config: "<keyword>" : "<value>"  (or the unquoted-key
+#     YAML/TOML variant)
+#   - URL-encoded / form: <keyword>=<value>
+#
+# The value is captured separately so we can placeholder-check it.
+# Min length 16 — shorter values are usually placeholders or test
+# fixtures rather than real secrets.
+_KEYWORD_VALUE_RE = re.compile(
+    r"\b(api[_-]?key|access[_-]?token|client[_-]?secret|"
+    r"aws[_-]?access[_-]?key|aws[_-]?secret|password|secret[_-]?key)"
+    r'\b\s*["\']?\s*[:=]\s*["\']?([A-Za-z0-9._\-]{16,})',
     re.IGNORECASE,
+)
+
+# Bearer + substantive token. Standalone — the keyword "Bearer" is
+# itself the credential-context cue.
+_BEARER_RE = re.compile(r"\b[Bb]earer\s+([A-Za-z0-9._\-]{20,})\b")
+
+# Form-attribute context for a keyword match: name="...", id="...",
+# for="...", class="..." right before the match position. If the
+# preceding ~80 chars match this, the keyword is a form field name,
+# not a credential leak.
+_FORM_ATTR_PRECEDING_RE = re.compile(
+    r'\b(?:name|id|for|class|placeholder|aria-label|data-[\w-]+)\s*=\s*["\'][^"\']*$'
 )
 _USER_OBJECT_RE = re.compile(
     r'"(UserId|userId|user_id|email|username)"\s*:',
@@ -464,13 +582,126 @@ def _host_and_path(url: str) -> tuple[str, str] | None:
     return host, (parsed.path or "/")
 
 
+@dataclass(frozen=True)
+class _SecretMatch:
+    """One secret-shaped match found in a response body."""
+
+    severity: str  # "critical" | "high"
+    detector_tag: str  # the sub-detector identifier (e.g. "aws_key", "keyword_value")
+    matched_text: str  # the actual matching substring, for the audit excerpt
+
+
+def _is_form_attribute_context(body: str, match_start: int) -> bool:
+    """Return True if the match position is inside an HTML form attribute value.
+
+    Used to suppress matches like ``<input name="password">`` — the
+    keyword is the *name* of a form field, not a credential. Looks at
+    the ~80 chars preceding the match position for an
+    ``attr="`` shape.
+    """
+    window_start = max(0, match_start - 80)
+    preceding = body[window_start:match_start]
+    return bool(_FORM_ATTR_PRECEDING_RE.search(preceding))
+
+
+def _find_secrets_in_body(body: str) -> list[_SecretMatch]:
+    """Return concrete secret-shaped matches in ``body``.
+
+    Layered: concrete-shape patterns (PEM, AWS, GitHub, Slack) fire
+    on shape alone (critical); keyword+value patterns require a
+    substantive non-placeholder value AND not be inside an HTML form
+    attribute (high); Bearer requires a substantive token (high).
+    Returns empty when nothing concrete is found — a body that
+    merely contains the substring ``password`` (e.g. a login form)
+    no longer fires on its own.
+    """
+    matches: list[_SecretMatch] = []
+
+    for m in _PEM_PRIVATE_KEY_RE.finditer(body):
+        matches.append(
+            _SecretMatch(
+                severity="critical",
+                detector_tag="pem_private_key",
+                matched_text=m.group(0),
+            )
+        )
+
+    for m in _AWS_KEY_ID_RE.finditer(body):
+        matches.append(
+            _SecretMatch(
+                severity="critical",
+                detector_tag="aws_access_key",
+                matched_text=m.group(0),
+            )
+        )
+
+    for m in _GH_TOKEN_RE.finditer(body):
+        matches.append(
+            _SecretMatch(
+                severity="critical",
+                detector_tag="github_token",
+                matched_text=m.group(0)[:20] + "…",  # truncate to avoid persisting the full token
+            )
+        )
+
+    for m in _SLACK_TOKEN_RE.finditer(body):
+        matches.append(
+            _SecretMatch(
+                severity="critical",
+                detector_tag="slack_token",
+                matched_text=m.group(0)[:20] + "…",
+            )
+        )
+
+    for m in _KEYWORD_VALUE_RE.finditer(body):
+        keyword = m.group(1)
+        value = m.group(2)
+        if _is_form_attribute_context(body, m.start()):
+            continue
+        if _is_placeholder_value(value):
+            continue
+        # Truncate the match to keep evidence excerpts compact and
+        # avoid persisting the full secret to the audit record.
+        excerpt = f"{keyword}=...{value[:8]}…"
+        matches.append(
+            _SecretMatch(
+                severity="high",
+                detector_tag="keyword_value",
+                matched_text=excerpt,
+            )
+        )
+
+    for m in _BEARER_RE.finditer(body):
+        token = m.group(1)
+        if _is_placeholder_value(token):
+            continue
+        matches.append(
+            _SecretMatch(
+                severity="high",
+                detector_tag="bearer_token",
+                matched_text=f"Bearer {token[:12]}…",
+            )
+        )
+
+    return matches
+
+
 def _detect_info_disclosure(
     observations: list[SessionObservation],
 ) -> list[FallbackHypothesis]:
-    """Match unauthenticated 200s containing version banners,
-    secrets, or user-shaped payloads.
+    """Match unauthenticated 200s containing real secrets, version
+    banners, or user-shaped payloads.
+
+    Secret detection requires concrete shape (PEM, AWS, GitHub,
+    Slack) or keyword+substantive-value with form-attribute and
+    placeholder exclusion — the bare-keyword substring detector was
+    too eager and fired on every HTML login form
+    (regression captured in the 2026-05-08 Anduril run that
+    promoted a false-positive HIGH on a stock Okta SAML login form
+    because the form contained ``<input name="password">``).
     """
     out: list[FallbackHypothesis] = []
+    severity_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
     for obs in observations:
         if obs.kind != "request":
             continue
@@ -482,11 +713,13 @@ def _detect_info_disclosure(
         url = _request_url(obs)
         if not body:
             continue
-        if _SECRET_HINT_RE.search(body):
+        secret_matches = _find_secrets_in_body(body)
+        if secret_matches:
+            best = max(secret_matches, key=lambda m: severity_rank[m.severity])
             out.append(
                 FallbackHypothesis(
                     bug_class="info_disclosure",
-                    severity_hint="high",
+                    severity_hint=best.severity,
                     evidence_refs=(obs.id,),
                     rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
                         bug_class="info_disclosure",
@@ -494,13 +727,17 @@ def _detect_info_disclosure(
                         curl_target=url,
                         obs_id=obs.id,
                         status=200,
-                        evidence_excerpt=f"secret/credential token detected ({_excerpt(body, 120)!r})",
+                        evidence_excerpt=(
+                            f"concrete secret matched by "
+                            f"{best.detector_tag} detector: "
+                            f"{best.matched_text!r}"
+                        ),
                         impact_note=(
                             "an unauthenticated reader of this endpoint "
                             "obtains credential-shaped material"
                         ),
                     ),
-                    detector="info_disclosure:secret",
+                    detector=f"info_disclosure:{best.detector_tag}",
                 )
             )
             continue
