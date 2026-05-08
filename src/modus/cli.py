@@ -209,6 +209,112 @@ def mcp_serve(scope_path: Path) -> None:
     sys.exit(asyncio.run(serve(scope_path)))
 
 
+@main.command("partition")
+@click.option(
+    "--input",
+    "input_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Hostname-per-line input file. Pass `-` to read from stdin.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory to write tier-a.txt, tier-b.txt, tier-c.txt, ambiguous.txt, review.md.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Print machine-readable JSON summary on stdout instead of the human table.",
+)
+def partition_command(input_path: Path, output_dir: Path, as_json: bool) -> None:
+    """Partition recon hostnames into Tier A/B/C with operator review.
+
+    Reads a list of hostnames (one per line, blanks and ``#``
+    comments skipped), applies the maintained DO-NOT-TOUCH /
+    careful-skip / probe partition, and writes:
+
+    \b
+    * ``tier-a.txt`` — probe-eligible hosts (operator authors
+      ``allowed_assets`` from this list)
+    * ``tier-b.txt`` — careful, skip this engagement
+    * ``tier-c.txt`` — DO NOT TOUCH (military, government, ITAR,
+      credential-gated customer deployments)
+    * ``ambiguous.txt`` — operator review required (markers that
+      could be defense or product codenames)
+    * ``review.md`` — Markdown report with matched tokens and
+      rationale per non-A host
+
+    Closes the partition-slip class of bug surfaced by the 2026-05-02
+    ``testsocom.anduril.com`` and 2026-05-08 ``piv.usmc.anduril.com``
+    incidents — the maintained token list under
+    ``modus.partition._MARKERS`` is the central place engagement
+    learnings accrete.
+
+    The structural firewall stays load-bearing: this is a
+    *recommendation* tool. The operator authors
+    ``ScopePolicy.allowed_assets`` from ``tier-a.txt`` (with optional
+    manual adjustment); the consistency-layer allow-list check is
+    what actually keeps the agent in scope.
+    """
+    from modus.partition import partition_hosts, render_review
+
+    raw_lines = _read_partition_input(input_path)
+    result = partition_hosts(raw_lines)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "tier-a.txt").write_text("\n".join(c.hostname for c in result.tier_a) + "\n")
+    (output_dir / "tier-b.txt").write_text("\n".join(c.hostname for c in result.tier_b) + "\n")
+    (output_dir / "tier-c.txt").write_text("\n".join(c.hostname for c in result.tier_c) + "\n")
+    (output_dir / "ambiguous.txt").write_text(
+        "\n".join(c.hostname for c in result.ambiguous) + "\n"
+    )
+    source_label = "stdin" if str(input_path) == "-" else str(input_path)
+    (output_dir / "review.md").write_text(render_review(result, source=source_label))
+
+    if as_json:
+        console.print_json(
+            data={
+                "total": result.total,
+                "tier_a": len(result.tier_a),
+                "tier_b": len(result.tier_b),
+                "tier_c": len(result.tier_c),
+                "ambiguous": len(result.ambiguous),
+                "output_dir": str(output_dir),
+            }
+        )
+    else:
+        table = Table(title=f"Partition: {result.total} hosts")
+        table.add_column("tier")
+        table.add_column("count", justify="right")
+        table.add_column("output", overflow="fold")
+        table.add_row("[red]C — DO NOT TOUCH[/red]", str(len(result.tier_c)), "tier-c.txt")
+        table.add_row("[yellow]ambiguous[/yellow]", str(len(result.ambiguous)), "ambiguous.txt")
+        table.add_row("[yellow]B — skip[/yellow]", str(len(result.tier_b)), "tier-b.txt")
+        table.add_row("[green]A — probe[/green]", str(len(result.tier_a)), "tier-a.txt")
+        console.print(table)
+        console.print(
+            f"[dim]Review: {output_dir / 'review.md'}[/dim]",
+        )
+        if result.ambiguous:
+            console.print(
+                f"[yellow]Operator review required for "
+                f"{len(result.ambiguous)} ambiguous host(s).[/yellow]"
+            )
+
+
+def _read_partition_input(input_path: Path) -> list[str]:
+    """Read partition input from a file path, or from stdin if ``-``."""
+    if str(input_path) == "-":
+        return sys.stdin.read().splitlines()
+    if not input_path.exists():
+        raise click.UsageError(f"input file does not exist: {input_path}")
+    return input_path.read_text().splitlines()
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     try:
         loaded = json.loads(path.read_text())
