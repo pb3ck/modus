@@ -172,12 +172,15 @@ invariants don't.
               operator
                  │
                  ▼
-        ┌────────────────────┐          ┌──────────────────┐
-        │  MCP host          │          │  modus-side LLM  │
-        │  (Claude Desktop,  │          │  (Anthropic,     │
-        │   Claude Code,     │          │   OpenAI,        │
-        │   Cursor, ...)     │          │   Ollama, ...)   │
-        └────────┬───────────┘          └────────▲─────────┘
+        ┌────────────────────┐          ┌─────────────────────────┐
+        │  MCP host          │          │  modus-side LLM         │
+        │  (Claude Desktop,  │          │  (Anthropic API,        │
+        │   Claude Code,     │          │   OpenAI API,           │
+        │   Cursor, ...)     │          │   OpenAI-compat: Ollama,│
+        │                    │          │     vLLM, OpenRouter,   │
+        │                    │          │   Claude Code           │
+        │                    │          │     subscription)       │
+        └────────┬───────────┘          └────────▲────────────────┘
                  │                               │
                  │ MCP (stdio, JSON-RPC)         │ used inside
                  ▼                               │ autonomous loop
