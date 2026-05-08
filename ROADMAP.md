@@ -261,50 +261,325 @@ holding human-test remains an unwritten test the v0.4.0 release
 notes acknowledge openly; it's deferred to whatever real user
 runs the docs first.
 
-## Beyond v0.4
+## Milestone 8 — Engagement-driven hardening + recon partition tooling (shipped 2026-05-08)
 
-Out of scope for v0.1 and intentionally deferred:
+Real-target validation against Anduril's bug-bounty programme
+surfaced three structural bugs and one operator-workflow gap.
+All shipped in one arc:
+
+- **Bug A — `ScopePolicy.default_headers` + merged-header audit
+  capture.** Bug-bounty programmes commonly require an
+  identifying header on every probe (HackerOne's
+  `X-HackerOne-Research`, Bugcrowd equivalents). Pinned headers
+  flow through the httpx client defaults and merge with
+  per-request action.headers at send time. The executor's audit
+  observation now records the *effective* header set (via
+  `client.build_request` + `client.send`), not just the
+  per-request slice — without this fix, the audit couldn't
+  substantiate that the H1 header had actually gone on the wire.
+  Shipped in 20b8bcc.
+- **Bug B — same-host enforcement on auth_bypass / IDOR pattern
+  detectors.** The detectors keyed by URL path only, so two
+  unrelated services that happened to share a path got bucketed
+  together; the 2026-05-08 Anduril run promoted an `auth_bypass
+  HIGH` false positive comparing `foxglove.chaos.anduril.dev/`
+  (200, deliberate health endpoint) to
+  `cyberchef.security.anduril.dev/` (401, IP-allowlisted). Bucket
+  key now includes hostname. Shipped in f89bf05.
+- **Bug C — layered secret detection in info_disclosure
+  pattern.** The bare-keyword substring detector fired on every
+  HTML login form on the internet — including a stock Okta SAML
+  login form because the form contained `<input name="password">`.
+  Refactor splits detection into concrete-shape patterns (PEM
+  keys, AWS access keys, GitHub/Slack tokens) with critical
+  severity, keyword+value patterns with form-attribute exclusion
+  + placeholder rejection at high severity, and bearer+token at
+  high severity. Shipped in e7de124.
+- **Issue #31 — `modus partition` CLI.** Closes the
+  partition-slip class of bug from two consecutive engagements
+  (`testsocom.anduril.com` 2026-05-02, `piv.usmc.anduril.com`
+  2026-05-08). Maintained DO-NOT-TOUCH token list under
+  `modus.partition._MARKERS` is the central place engagement
+  learnings accrete: `.gov.` infix, 13 combatant commands
+  (AFRICOM, CENTCOM, CYBERCOM, EUCOM, INDOPACOM, NORTHCOM, PACOM,
+  SOCOM, SOUTHCOM, SPACECOM, STRATCOM, TRANSCOM, USFF), service-
+  branch acronyms (USAF, USMC, USCG, USSF) with segment-boundary
+  matching, defense agencies (Pentagon, DARPA), `piv.`/`cac.`
+  prefix rule for credential-gated customer deployments.
+  Verified live against the 2026-05-08 Anduril subfinder output
+  (636 hosts → 29 Tier C / 7 ambiguous / 8 Tier B / 592 Tier A),
+  catching `testsocom`, `piv.usmc`, plus three additional PIV
+  military deployments the ad-hoc partition would have missed.
+  Shipped in 56fae22.
+- **ADR 0005 foundation slice.** Three new optional
+  `ScopePolicy` fields with consistency-layer wiring:
+  `scope_wildcards` (program-published wildcard authorization,
+  validated `*.example.com` patterns), `recon_mode` (gates
+  `Request` action unconditionally + `Tool` actions to `read`
+  side-effect tier), `denied_patterns` (defence-in-depth deny
+  check with substring/segment/prefix/infix match modes). Plus
+  `default_tier_c_denied_patterns()` helper exposing the
+  partition tool's deny set automatically. Backwards-compatible:
+  every v0.4 scope file loads and behaves identically. Shipped
+  in 76af8c8.
+
+ADRs 0005 and 0006 also drafted in this arc (33e8d98, 02ed433),
+proposing the recon-mode + two-phase-session design (#29) and
+engagement-coordinator session-of-sessions design (#30).
+
+Tests: 439 passing (was 312 at v0.4.0), ruff clean, mypy clean
+on changed surface.
+
+## Milestone 9 — ADR 0005 full implementation: agent-driven recon (#29)
+
+Closes the recon-side operator-driven workflow that today
+consumes ~30 minutes of operator time before Modus's autonomous
+loop can usefully run on a fresh target. The two-phase
+autonomous-session design from ADR 0005, with the data-model
+foundation already shipped in M8. Three slices remaining:
+
+- **`corpus.propose_scope_expansion` builtin.** Reads the
+  current target's `host`-kind assets from Quarry, filters to
+  those matching `scope_wildcards` and not already in
+  `allowed_assets`, excludes `denied_patterns` matches, runs
+  `modus.partition.partition_hosts` over the survivors, returns a
+  structured proposal: `{tier_a, tier_b, tier_c, ambiguous}` with
+  per-host `matched_tokens` and `rationale`.
+- **AgentLoop integration.** The autonomous loop, on observing
+  the propose-scope-expansion tool's result, marks the run as
+  `expansion_proposed` in the SessionRecord and exits with
+  `termination_reason="expansion_proposed"`. The
+  `run_autonomous_session` payload gains a
+  `scope_expansion_proposal` field surfacing the proposal to the
+  MCP host.
+- **`modus scope commit-expansion` CLI verb.** Operator reviews
+  the proposal, accepts (typically Tier A entire, or
+  cherry-picked subset), and the CLI rewrites the scope file
+  with the expanded `allowed_assets` and clears `recon_mode`.
+  The next `run_autonomous_session` call inherits the narrowed
+  allow-list and probes normally. The session-resume mechanism
+  is the existing `start_autonomous_session` /
+  `poll_autonomous_session` pair — the operator's commit doesn't
+  require Modus to maintain pause-and-resume state internally.
+
+Exit criteria: a fresh-target engagement runs end-to-end with
+exactly two operator decisions — scope-commit and findings-
+review — instead of the ~20 decisions per engagement that the
+2026-05-08 Anduril run required. The structural firewall property
+(operator-curated allow-list at probe time) is preserved; what
+changes is *who curates the candidate set* (the agent proposes,
+the operator commits).
+
+Estimate: ~2-3 weeks of focused work. Backwards compatible with
+M8.
+
+## Milestone 10 — ADR 0006 full implementation: engagement coordinator (#30)
+
+Session-of-sessions orchestrator. Generalises the autonomy claim
+from "within a session" (M3/M4) to "across a multi-cycle
+engagement." Deterministic state machine driving LLM decisions
+within bounded transitions; operator gates only at scope-commit
+(per M9) and findings-review. Persisted in Quarry as new
+`engagements` table (own Quarry-side ADR). Parallel CLI
+(`modus engagement run`) and MCP tool
+(`modus.coordinate_engagement` + `modus.engagement_advance`).
+
+Three implementation surfaces:
+
+- **Quarry-side**: schema migration adding `engagements` table,
+  read tools (`engagement_get`, `engagement_list`,
+  `engagement_decision_log`), write tools (`engagement_create`,
+  `engagement_advance`, `engagement_pause`, `engagement_resume`).
+  Own ADR on the Quarry side.
+- **Modus-side core**: `modus.engagement` module with
+  `EngagementState` enum (INIT, RECON, AWAITING_SCOPE_REVIEW,
+  PROBE, DECIDING, AWAITING_FINDINGS_REVIEW, COMPLETE, PAUSED,
+  FAILED), `Engagement` dataclass, `EngagementCoordinator` class
+  with one method per transition,
+  `LlmCoordinatorProposer` and
+  `DeterministicCoordinatorProposer` (both implementing a
+  `CoordinatorProposer` Protocol — same pattern fallback shape
+  ADR 0002 introduced for the per-action proposer).
+- **Modus-side surface**: `modus engagement` CLI subcommand
+  (`run`, `pause`, `resume`, `status`, `replay`),
+  `modus.coordinate_engagement` MCP tool,
+  `modus.engagement_advance` follow-up tool for operator gates.
+
+The DECIDING transition is the only multi-edge state — the LLM
+picks among `widen` (more recon), `deepen` (more probe budget),
+`stop` (calibration met), or `fail` (blocked) given corpus
+state, prior session histories, the coordinator's own decision
+log, and hard budgets (`max_engagement_wall_time`,
+`max_engagement_api_cost`).
+
+Cost containment: deterministic fallback at DECIDING when LLM
+budget exhausted or by operator opt-out, decision-input digest
+caching, hard cost budget that pauses the engagement when
+reached.
+
+Exit criteria: a multi-day Anduril-class engagement runs
+unattended in a `tmux` session, surviving operator absences
+through `PAUSED` state, with the operator returning only at
+scope-commit and findings-review gates. Decision log
+post-replay-able from the corpus alone.
+
+Estimate: ~4-6 weeks of focused work after M9 lands. Depends on
+M9; a coordinator can't drive a two-phase autonomous-session
+loop that doesn't exist.
+
+## Beyond M10 — Calibration for novel and creative findings
+
+The bar shifts from *competent on medium-effort programmes*
+(M9 + M10 reach this) to *creative on real targets*. Pattern
+detectors find known shapes; novel findings, by definition,
+don't fit known shapes. Calibrating for novelty is therefore
+not about adding more `_detect_*` functions to
+`evidence_patterns.py` — that path produces a faster lookup of
+well-known bug patterns, not a richer creative process.
+
+What actually drives novel findings in security research:
+reading source / API contracts deeply for intent-vs-implementation
+divergences; understanding the trust model holistically for
+states the system assumed couldn't exist; composing primitives
+across components into chains where each individual piece looks
+benign; catching non-obvious side effects (race conditions,
+time-of-check time-of-use, cache poisoning across users);
+applying lessons from disclosed bugs in analogous systems;
+persistent "what if" questioning with non-obvious branches;
+reading code nobody else reads.
+
+Modus does ~zero of these today. Six concrete avenues, ordered
+by impact-per-effort:
+
+1. **Wider corpus + RAG-over-corpus proposer.** The proposer's
+   per-step prompt today sees action history, recent
+   observations, scope, bug-class templates — and *not* relevant
+   context retrieved from the larger corpus. That's the single
+   biggest bottleneck on creative reasoning. Quarry adapters for
+   git repos (source code), API documentation (OpenAPI / Swagger),
+   prior bug-bounty disclosures (HackerOne disclosed reports,
+   CVEs, post-mortems indexed by bug class + target type),
+   operator notes. Modus tools for retrieval-augmented context —
+   the proposer per-step asks "show me where this endpoint is
+   implemented" or "find me bugs like this in similar systems"
+   and gets relevant snippets. Most novel findings are old bugs
+   in new contexts; this is the path to making that pattern
+   reachable. ~6-10 weeks.
+2. **Chain-aware proposer reasoning.** Today's proposer thinks
+   in single actions. Real bug-bounty work thinks in
+   *primitives → goals → bridges*. The action grammar already
+   supports this (`Differential` takes many observations,
+   `Hypothesize.evidence_refs` is a tuple); the per-step prompt
+   doesn't structure thinking this way. Reframing the prompt to
+   track primitives + goals + bridge candidates lets the LLM do
+   chain-construction work the current prompt actively
+   suppresses. ~2-3 weeks.
+3. **Adversarial primitives as Tool actions.** `request.race(N,
+   ...)` for race-condition probing, `request.smuggle(...)` for
+   header-smuggling / cache-poisoning surface, `fuzzer.mutate_
+   param(...)` for parameter mutation strategies. Operators
+   declare in scope file's `tools` block; the agent uses them
+   when the proposer thinks an adversarial probe makes sense.
+   ~3-4 weeks for a useful starter set.
+4. **Self-critique / proposal review.** A second LLM call per
+   step that critiques the first: "is this proposal actually
+   likely to find a bug, or am I confusing myself?" Penalty for
+   false-positive class proposals; bonus for proposals that
+   articulate concrete impact. The right shape is a layered
+   proposer — cheap model proposes, expensive model reviews
+   (Sonnet-then-Opus). ~2-3 weeks including prompt engineering.
+5. **Operator-feedback calibration.** Every false-positive the
+   operator marks teaches the proposer something. Persisted in
+   Quarry as "things you got wrong on this engagement." Surfaced
+   in the per-step prompt as "you previously over-flagged X; be
+   more conservative on patterns like that." Over engagements,
+   Modus calibrates to *this operator's* judgment of what counts
+   as a real bug. ~3-4 weeks.
+6. **Stronger model layering.** Three-tier proposer: pattern
+   fallback (free, deterministic), Sonnet for routine action
+   proposal (cheap, fast), Opus for chain construction +
+   hypothesis evaluation + self-critique (slower, smarter). Each
+   tier doing what it's best at. ~2-3 weeks.
+
+Aggregate: ~9-12 months of focused work after M10 to reach
+*creative for medium-effort programmes*. The frontier of what's
+achievable for *creative on top-tier programmes* depends on LLM
+capability that may or may not arrive on schedule; the
+architecture should be ready for it. The honest read is that
+novelty is upper-bounded by the proposer's reasoning capability,
+and current frontier models still sit well below "frontier human
+security researcher." Some of the gap closes when frontier
+models get qualitatively better at multi-step adversarial
+reasoning; some of the gap is fundamentally about *taste* (which
+bugs are interesting vs. just technically valid) that's hard to
+encode.
+
+The single existence-proof milestone worth aiming at: a
+RAG-augmented proposer surfaces a finding the operator agrees
+is creative on a real target. One such run flips this section
+from "probably possible" to "in hand."
+
+## Long-horizon / speculative
+
+Items that may belong on the roadmap eventually but aren't
+ready to estimate:
 
 - **Hypothesis ledger with Bayesian action selection.** Each
   session opens with explicit hypotheses ("this endpoint has
   IDOR"), each carrying a probability that gets updated by
   every observation; the proposer chooses actions that maximize
   expected information gain across competing hypotheses.
-  Belongs after M4 ships and we have data on what value
-  heuristics actually work.
+  Overlaps with chain-aware reasoning + operator-feedback
+  calibration; would be the unified probabilistic substrate for
+  both.
 - **Plan-then-verify multi-step actions.** The LLM emits a DAG
   of typed actions with data dependencies; Z3 verifies the whole
-  plan before any of it runs.
-- **MCP "sampling" capability for the autonomous loop** —
-  letting Modus call back into the host's LLM for proposal
-  generation instead of using its own provider. Considered for
-  v0.1 and rejected because host support is partial; revisit
-  when sampling support converges across hosts.
+  plan before any of it runs. Overlaps with chain-aware
+  reasoning and self-critique; the formal-verification angle
+  would be the differentiator.
 - **Process-reward fine-tuning from Quarry promotion history.**
-  Implicit feedback (which Candidates the operator promoted) as
-  a training signal for the proposer. Requires Quarry-side
-  promotion volume that doesn't exist yet.
-- **Additional bug classes beyond the v0.1 set.**
-- **Local-model-only operation.** Waits on local agentic
-  capability reaching parity with frontier models on the
-  relevant tasks.
+  Implicit feedback (which Candidates the operator promoted)
+  as a training signal for the proposer. Requires Quarry-side
+  promotion volume that doesn't exist yet (currently dozens of
+  Findings across all engagements; useful fine-tuning needs
+  thousands). Adjacent to operator-feedback calibration but
+  distinct (training vs. prompting).
 - **Adapter coverage for additional corpus substrates.** The
   corpus interface is documented; in principle any MCP server
   matching it works. In practice we are coupled to Quarry until
   someone needs otherwise.
-- **Submission automation.** Stays a non-goal at every
-  milestone, as a hard rule, not a deferred feature.
+- **MCP "elicitation" capability for the autonomous loop.**
+  Letting Modus prompt the host's LLM mid-session for
+  operator-via-host clarifications instead of the always-bounded
+  operator-gate model from ADR 0006. Reconsidered if MCP host
+  support converges and the operator-gate shape proves too
+  rigid for some engagement classes.
+- **A community-maintained partition-tokens repo.** Fetched by
+  `modus partition` at run time, signed, validated. Addresses
+  the ADR 0005 §Negative-consequences worry about
+  `denied_patterns` source-of-truth lagging reality. Niche;
+  nowhere near the critical path.
 
 ## What's deliberately not on the roadmap
 
-- An auto-promotion mode. Promotion of a Candidate to a Finding
-  is always a human action via Quarry's CLI. Modus has no such
-  surface and will not.
-- A Modus-side report-generation feature. Submission-ready text
-  is the operator's job; Modus produces structured Candidates
-  in Quarry.
-- A Modus-side chat UI. Modus is an MCP server; the operator
-  drives it from their host. If a UI is wanted, it lives in the
-  host or in a separate tool that consumes the corpus directly.
-- A SaaS offering. Modus runs locally; the corpus runs locally
-  via Quarry.
+- **Submission automation.** Stays a non-goal at every
+  milestone, as a hard rule, not a deferred feature. Modus has
+  no `submit` / `publish` / `post` / `report` /
+  `report-to-h1`-shaped tool, declaring one in a scope file's
+  `tools` block is a policy violation, and submission of a
+  Finding to a bug-bounty programme remains the operator's,
+  performed outside Modus. The autonomous loop closes the
+  Candidate→Finding lifecycle inside the corpus (M7); the
+  Finding→submitted-to-programme line is what stays absolute.
+- **A Modus-side report-generation feature.** Submission-ready
+  text is the operator's job; Modus produces structured
+  Candidates and Findings in Quarry. Operators draft submission
+  text from those.
+- **A Modus-side chat UI.** Modus is an MCP server; the
+  operator drives it from their host. If a UI is wanted, it
+  lives in the host or in a separate tool that consumes the
+  corpus directly.
+- **A SaaS offering.** Modus runs locally; the corpus runs
+  locally via Quarry. Multi-tenant hosting of an offensive
+  agent is a different product with different risk posture; if
+  it ever exists, it's somewhere else, not this repository.
