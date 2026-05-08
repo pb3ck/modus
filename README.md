@@ -90,9 +90,13 @@ performed outside Modus.
   memory. Modus does not duplicate Quarry's ingestion or its
   Finding lifecycle.
 - Not a model wrapper. Modus has its own LLM provider for the
-  autonomous loop, but it is provider-portable
-  (Anthropic / OpenAI / OpenAI-compatible: Ollama, vLLM,
-  OpenRouter). The host's LLM and Modus's LLM are independent
+  autonomous loop, but it is provider-portable: direct API
+  (Anthropic, OpenAI), OpenAI-compatible (Ollama, vLLM,
+  OpenRouter via `base_url`), MCP host sampling (when the host
+  supports it), or `claude-cli` — a subscription-billed path
+  that shells out to Claude Code's `claude --print` so
+  operators with a Claude Pro/Max subscription don't pay
+  per-token. The host's LLM and Modus's LLM are independent
   choices the operator makes separately.
 - Not a chatbot. Modus's autonomous tool returns a structured
   batch of Candidates, not a narrative response. The host's
@@ -230,9 +234,10 @@ operator-declared tools share the path. ADR-0004 documents the
 pivot from the closed v0.1 vocabulary to this shape.
 
 The operator configures Modus as an MCP server in their host's
-settings:
+settings. The two common shapes:
 
 ```json
+// Per-token API billing (any MCP host)
 {
   "mcpServers": {
     "modus": {
@@ -248,21 +253,72 @@ settings:
 }
 ```
 
+```json
+// Subscription billing via Claude Pro/Max (requires Claude Code installed)
+{
+  "mcpServers": {
+    "modus": {
+      "command": "modus",
+      "args": ["mcp", "--scope", "/path/to/scope.json"],
+      "env": {
+        "QUARRY_HOME": "/path/to/quarry/home",
+        "MODUS_LLM_PROVIDER": "claude-cli",
+        "MODUS_LLM_BASE_URL": "/path/to/claude"
+      }
+    }
+  }
+}
+```
+
+The `claude-cli` provider shells out to `claude --print` per
+proposer call. Adds ~3 seconds of Node startup overhead per
+step but bills against a Claude Pro/Max subscription rather
+than API tokens. Workaround for MCP hosts that don't yet
+implement the `sampling/createMessage` capability — Anthropic's
+clients (Claude Desktop and Claude Code) are in this category
+as of 2026-05-08.
+
 The host then sees Modus's tool surface — autonomous-session
 tools and verified-action tools — and the operator drives via
 ordinary host conversation. See
 [`docs/mcp-host-integration.md`](./docs/mcp-host-integration.md)
 for full setup.
 
+## Operator tooling
+
+Beyond the MCP server, Modus ships a small CLI for operator
+prep work that doesn't belong inside the agent loop:
+
+- `modus action validate <spec.json>` — run the consistency
+  layer against a static action + state spec; prints a per-
+  action verdict. Useful for testing scope policies offline.
+- `modus corpus status` — sanity-check that Modus can reach
+  the Quarry binary and that the corpus is in a healthy state.
+- `modus partition --input <subs.txt> --output-dir <dir>` —
+  classify recon hostnames into Tier A/B/C using a maintained
+  DO-NOT-TOUCH token list (combatant commands, ITAR, `.gov.`,
+  PIV/CAC deployment prefixes). The operator authors
+  `allowed_assets` from `tier-a.txt` manually; this is a
+  recommendation tool, not a substitute for the consistency
+  layer's allow-list. Closes the partition-slip class of bug
+  surfaced in two consecutive engagements.
+- `modus mcp --scope <path>` — start the MCP server (this is
+  what the host launches via `mcpServers.modus.command`).
+
+`--help` on any subcommand for the full option list.
+
 ## Scope
 
-### v0.1 bug classes
+### Bug classes
 
-To be confirmed and pinned in a follow-up ADR. Likely
-candidates: IDOR, SSRF, auth bypass, plus one of (open redirect
-chains, business logic on financial flows, SQLi on parameterized
-endpoints). Modus is web-only at v0.1. No binary exploitation,
-no priv-esc, no smart contracts.
+Modus's evidence-pattern library covers eight bug classes with
+canonical recognition templates and severity defaults:
+`auth_bypass`, `idor`, `info_disclosure`, `sqli`, `ssrf`, `xss`,
+`csrf`, `business_logic`. The pattern fallback proposer fires
+on the first four when the LLM keeps abdicating; the prompt
+templates render for all eight when the operator passes
+`bug_classes` to `run_autonomous_session`. Modus is web-only —
+no binary exploitation, no priv-esc, no smart contracts.
 
 ### v0.1 MCP hosts
 
@@ -273,14 +329,33 @@ implements the standard MCP stdio transport. Setup snippets for
 the common ones are in
 [`docs/mcp-host-integration.md`](./docs/mcp-host-integration.md).
 
-### v0.1 LLM providers (Modus-internal, for autonomous sessions)
+### LLM providers (Modus-internal, for autonomous sessions)
 
-Anthropic primary, OpenAI secondary, OpenAI-compatible (Ollama,
-vLLM, OpenRouter via `base_url`) tertiary. The provider-portable
-proposer is the only Modus-internal LLM choice; the host's LLM
-choice is separate and outside Modus's control. Local-only
-support is a v0.3+ goal, gated on local agentic capability
-catching up.
+Five provider modes via `MODUS_LLM_PROVIDER`:
+
+- `anthropic` — direct Anthropic API. Per-token cost. Recommended
+  default for operators with an API key and an engagement budget.
+- `openai` / `openai-compatible` — covers OpenAI proper plus any
+  OpenAI-compatible endpoint via `base_url` (Ollama, vLLM,
+  OpenRouter). Local-model operators use this mode pointed at
+  Ollama; the M7 pattern fallback proposer bridges the
+  decisiveness gap that mid-size open-weight models hit on
+  multi-step reasoning.
+- `host` — delegates each proposer call to the MCP host's LLM via
+  `sampling/createMessage`. Subscription-billed in principle.
+  Not viable through Anthropic's clients today (verified
+  2026-05-08: Claude Desktop and Claude Code v2.1.136 both
+  return JSON-RPC `-32601 "Method not found"`); usable when an
+  MCP host that supports sampling becomes available.
+- `claude-cli` — subprocess workaround for the `host` mode gap.
+  Shells out to `claude --print` per proposer call, using
+  Claude Code's OAuth/keychain auth for subscription billing.
+  Adds ~3 seconds of Node startup overhead per step but bills
+  flat against Claude Pro/Max.
+
+The provider-portable proposer is the only Modus-internal LLM
+choice; the host's LLM choice is separate and outside Modus's
+control.
 
 ### v0.1 corpus
 
