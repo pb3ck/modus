@@ -176,17 +176,16 @@ JSONL form above is just the simplest path to get started.)
 In a Claude Desktop conversation:
 
 > Use Modus to look for IDOR or info-disclosure vulnerabilities
-> on the juice-shop target. Pass `recon_jsonl_path` =
-> `/tmp/recon.jsonl` so the loop seeds its evidence pool from
-> the recon I just did. Budget max_steps=25.
+> on the juice-shop target. Budget max_steps=25.
 
 The host's LLM will call `modus.run_autonomous_session` with the
-target name, the bug classes, the budget, and the
-`recon_jsonl_path`. Modus reads the JSONL, materializes one
-`SessionObservation` per record into the run's evidence pool
-(so the agent can cite them in `hypothesize` actions and the
-deterministic fallback proposer can pattern-match against them),
-then runs the propose-prune-rank-execute loop end-to-end —
+target name, the bug classes, and the budget. Modus auto-loads
+the responses-shape evidence already in Quarry for that target
+(via the `list_response_artifacts` MCP read tool), materializes
+one `SessionObservation` per record into the run's evidence
+pool (so the agent can cite them in `hypothesize` actions and
+the deterministic fallback proposer can pattern-match against
+them), then runs the propose-prune-rank-execute loop end-to-end —
 sampling candidate actions from the host's LLM (or Modus's
 configured provider), Z3-pruning the inconsistent ones,
 executing the survivors via its HTTP executor, accumulating
@@ -196,8 +195,15 @@ proposal, every Z3 verdict, every executed action, any
 Candidates the agent authored, and any Findings the loop
 auto-promoted.
 
-The result also reports `seeded_observation_count` so you can
-verify the recon JSONL was loaded; if the path was wrong or
+The result reports `seed_from_corpus` (whether auto-load was
+enabled) and `seeded_observation_count` (how many JSONL records
+the optional `recon_jsonl_path` argument materialized — separate
+from the corpus auto-load). If you ingested into Quarry and
+want a cold-start run anyway, pass `seed_from_corpus=false`. If
+you want to layer an additional JSONL on top of the corpus
+auto-load (e.g. recon you didn't ingest), pass
+`recon_jsonl_path` — both sources combine, deduped by
+observation id. If the JSONL path was wrong or
 unreadable the result includes a `recon_warning` explaining why
 no observations were seeded.
 

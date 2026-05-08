@@ -209,6 +209,28 @@ class Finding:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ResponseArtifact:
+    """One responses-shape artifact row from Quarry.
+
+    Returned by :meth:`CorpusClient.list_response_artifacts`. The
+    autonomous loop materialises one of these per record into a
+    :class:`SessionObservation` so the pattern detectors and the
+    LLM proposer can reason over operator recon without the
+    operator passing a JSONL path explicitly.
+    """
+
+    observation_id: str
+    url: str
+    status: int
+    response_headers: dict[str, str]
+    response_body: str
+    body_truncated: bool
+    body_full_len: int
+    ingested_at: str
+    sha256: str
+
+
 # --------------------------------------------------------------------- client
 
 
@@ -281,6 +303,14 @@ class CorpusClient(Protocol):
         score: float | None = None,
         evidence_refs: tuple[str, ...] = (),
     ) -> Candidate: ...
+
+    async def list_response_artifacts(
+        self,
+        *,
+        target: str,
+        limit: int | None = None,
+        max_body_bytes: int | None = None,
+    ) -> list[ResponseArtifact]: ...
 
 
 class _SessionProtocol(Protocol):
@@ -355,6 +385,15 @@ class QuarryMcpClient:
             # "upgrade Quarry to author Candidates from agent reasoning"
             # message rather than a session refuse.
             "candidate_create",
+            # ``list_response_artifacts`` shipped in Quarry post-
+            # candidate_create; older corpus servers don't expose it.
+            # Modus's autonomous loop uses this to auto-seed the
+            # run pool from operator recon already ingested into the
+            # corpus. When the tool is absent, the loop falls back
+            # to whatever ``initial_observation_ids`` /
+            # ``recon_jsonl_path`` the caller provided, which on
+            # older Quarry versions is the only path.
+            "list_response_artifacts",
         }
     )
 
@@ -708,6 +747,67 @@ class QuarryMcpClient:
         except (KeyError, TypeError, ValueError) as exc:
             raise CorpusSchemaError(f"candidate_create payload malformed: {exc}") from exc
 
+    # --- responses-shape evidence retrieval (read tool) ----------------
+
+    async def list_response_artifacts(
+        self,
+        *,
+        target: str,
+        limit: int | None = None,
+        max_body_bytes: int | None = None,
+    ) -> list[ResponseArtifact]:
+        """Fetch responses-shape artifacts for a target.
+
+        Mirrors Quarry's MCP ``list_response_artifacts`` read tool.
+        ``target`` is a target name (preferred) or a full UUID.
+        ``limit`` caps the number of artifacts returned (server
+        default 100, max 500). ``max_body_bytes`` caps each
+        artifact's body length (server default 64 KB) — bodies
+        longer than this are truncated and the result records
+        ``body_truncated=True``.
+
+        Used by the autonomous loop's setup phase to seed the
+        run's evidence pool from operator recon already ingested
+        into Quarry as a ``responses`` source — the
+        operator-friendly alternative to passing
+        ``recon_jsonl_path`` explicitly. Empty list when the
+        corpus has no responses-shape artifacts for the target.
+        """
+        args: dict[str, Any] = {"target": target}
+        if limit is not None:
+            args["limit"] = limit
+        if max_body_bytes is not None:
+            args["max_body_bytes"] = max_body_bytes
+        payload = await self._call("list_response_artifacts", args)
+        rows = payload.get("artifacts", [])
+        if not isinstance(rows, list):
+            raise CorpusSchemaError("list_response_artifacts payload missing 'artifacts' list")
+        out: list[ResponseArtifact] = []
+        for row in rows:
+            try:
+                headers_raw = row.get("response_headers", {})
+                headers = (
+                    {str(k): str(v) for k, v in headers_raw.items()}
+                    if isinstance(headers_raw, dict)
+                    else {}
+                )
+                out.append(
+                    ResponseArtifact(
+                        observation_id=str(row["observation_id"]),
+                        url=str(row["url"]),
+                        status=int(row["status"]),
+                        response_headers=headers,
+                        response_body=str(row.get("response_body", "")),
+                        body_truncated=bool(row.get("body_truncated", False)),
+                        body_full_len=int(row.get("body_full_len", 0)),
+                        ingested_at=str(row.get("ingested_at", "")),
+                        sha256=str(row.get("sha256", "")),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CorpusSchemaError(f"list_response_artifacts row malformed: {exc}") from exc
+        return out
+
     # --- Candidate→Finding promotion (writes a Finding) ---------------
 
     async def promote_finding(
@@ -968,6 +1068,19 @@ class StubCorpusClient:
             was_new=True,
         )
 
+    async def list_response_artifacts(
+        self,
+        *,
+        target: str,
+        limit: int | None = None,
+        max_body_bytes: int | None = None,
+    ) -> list[ResponseArtifact]:
+        # Deterministic stand-in: returns no artifacts. Tests
+        # exercising the autonomous-loop seeding path inject a
+        # custom subclass that returns a fixture list.
+        _ = target  # silence unused-arg
+        return []
+
 
 __all__ = [
     "Candidate",
@@ -981,6 +1094,7 @@ __all__ = [
     "CorpusUnavailableError",
     "Finding",
     "QuarryMcpClient",
+    "ResponseArtifact",
     "SearchHit",
     "StubCorpusClient",
     "TargetSummary",

@@ -12,6 +12,50 @@ notice.
 
 ### Added
 
+- **`seed_from_corpus` argument on `run_autonomous_session` /
+  `start_autonomous_session` MCP tools** (default `true`). When
+  enabled, the autonomous loop calls Quarry's
+  `list_response_artifacts` MCP read tool at the start of each
+  run, materializes the structured records into
+  `SessionObservation`s, and folds their ids into
+  `initial_observation_ids` — so any responses-shape evidence
+  the operator has already ingested into Quarry as a `responses`
+  source becomes citable in `hypothesize` actions automatically.
+  Operator UX: "if you ingested recon into Quarry, the agent
+  uses it." No JSONL path argument required. Older Quarry
+  versions that don't expose `list_response_artifacts` skip the
+  auto-load (soft-warned via INFO log) and the loop proceeds
+  with whatever pool the caller provided. The `recon_jsonl_path`
+  argument still works and combines with the corpus auto-load
+  (deduped by observation id) for operators who want both.
+- **`QuarryMcpClient.list_response_artifacts(target, limit?,
+  max_body_bytes?)`** — async method wrapping Quarry's MCP read
+  tool (Quarry main as of 2026-05-08, post pb3ck/quarry#114).
+  Returns `list[ResponseArtifact]`. `list_response_artifacts`
+  joins `OPTIONAL_TOOLS`.
+- **`ResponseArtifact` dataclass** in `modus.corpus`
+  (`observation_id`, `url`, `status`, `response_headers`,
+  `response_body`, `body_truncated`, `body_full_len`,
+  `ingested_at`, `sha256`).
+- **`AgentLoop.run(seed_from_corpus=True)`** parameter that
+  drives the auto-load. `_seed_from_corpus(target_name)` opens
+  a Quarry MCP client via `session.with_quarry()`, materializes
+  artifacts as observations, and returns the seeded id set.
+  Failures (older Quarry, target not found, Quarry binary
+  missing) are logged at INFO/WARNING and treated as
+  empty-pool — never raise.
+- **`docs/quickstart.md` §4b** updated to reflect auto-load as
+  the default — operators don't need to pass any path argument
+  if they've already ingested recon into Quarry.
+
+### Changed
+
+- **`run_autonomous_session` result payload** gains
+  `seed_from_corpus` (echoes the operator's choice) alongside
+  the existing `seeded_observation_count` (count from the
+  optional `recon_jsonl_path` JSONL). The two fields disambiguate
+  the two seeding paths.
+
 - **`recon_jsonl_path` argument on `run_autonomous_session` /
   `start_autonomous_session` MCP tools.** Operators driving
   Modus from an MCP host (Claude Desktop, etc.) can now pass
