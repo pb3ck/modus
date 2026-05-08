@@ -297,6 +297,95 @@ class TestDetectEvidencePatterns:
         assert result[0].severity_hint == "high"
         assert set(result[0].evidence_refs) == {"obs-9", "obs-10"}
 
+    def test_auth_bypass_does_not_match_across_hosts(self) -> None:
+        # Regression: the 2026-05-08 Anduril tool-validation run
+        # promoted a false-positive auth_bypass HIGH because the
+        # detector keyed only by path. ``foxglove.chaos.anduril.dev/``
+        # (200, deliberate health endpoint) and
+        # ``cyberchef.security.anduril.dev/`` (401, IP-allowlisted)
+        # were two unrelated services that happened to share ``/``;
+        # auth_bypass requires same-host same-path.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_open = self._obs("obs-fx", "https://foxglove.chaos.anduril.dev/", 200)
+        obs_protected = self._obs("obs-cc", "https://cyberchef.security.anduril.dev/", 401)
+        result = detect_evidence_patterns([obs_open, obs_protected], ("auth_bypass",))
+        assert result == [], (
+            "auth_bypass detector matched across two unrelated hosts that "
+            "happen to share path '/'; same-host enforcement is broken"
+        )
+
+    def test_auth_bypass_matches_same_host_different_authstate(self) -> None:
+        # The legitimate auth_bypass shape: same host, same path, one
+        # request authenticated (or not) returns 200 while another
+        # returns 401/403. Ensures the same-host fix didn't over-tighten.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_protected = self._obs("obs-p", "https://api.example.com/admin/users", 401)
+        obs_open = self._obs(
+            "obs-o", "https://api.example.com/admin/users", 200, body='{"data":[]}'
+        )
+        result = detect_evidence_patterns([obs_protected, obs_open], ("auth_bypass",))
+        assert len(result) == 1
+        assert set(result[0].evidence_refs) == {"obs-p", "obs-o"}
+
+    def test_auth_bypass_does_not_match_same_path_different_subdomains(self) -> None:
+        # Subdomains of the same parent are still different hosts —
+        # ``foxglove.bunker.anduril.dev`` and
+        # ``foxglove.chaos.anduril.dev`` are sibling deployments,
+        # not the same handler with different auth.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_a = self._obs("obs-a", "https://foxglove.bunker.anduril.dev/", 200)
+        obs_b = self._obs("obs-b", "https://foxglove.chaos.anduril.dev/", 401)
+        result = detect_evidence_patterns([obs_a, obs_b], ("auth_bypass",))
+        assert result == []
+
+    def test_idor_does_not_match_across_hosts(self) -> None:
+        # ``/users/1`` on host A and ``/users/2`` on host B aren't
+        # enumerable IDs of the same handler — they're two unrelated
+        # services that happen to share a URL shape.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_a = self._obs(
+            "obs-iA",
+            "https://api-a.example.com/users/1",
+            200,
+            body='{"UserId":1,"email":"a@x.com"}',
+        )
+        obs_b = self._obs(
+            "obs-iB",
+            "https://api-b.example.com/users/2",
+            200,
+            body='{"UserId":2,"email":"b@x.com"}',
+        )
+        result = detect_evidence_patterns([obs_a, obs_b], ("idor",))
+        assert result == [], (
+            "idor detector matched across two unrelated hosts with similar "
+            "URL shapes; same-host enforcement is broken"
+        )
+
+    def test_idor_matches_same_host_enumerable_ids(self) -> None:
+        # Sanity: same host, two different IDs of the same handler,
+        # both 200 with user-shaped data — the canonical IDOR. The
+        # same-host fix must not break this.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_1 = self._obs(
+            "obs-h1",
+            "https://api.example.com/users/1",
+            200,
+            body='{"UserId":1,"email":"a@x.com"}',
+        )
+        obs_2 = self._obs(
+            "obs-h2",
+            "https://api.example.com/users/2",
+            200,
+            body='{"UserId":2,"email":"b@x.com"}',
+        )
+        result = detect_evidence_patterns([obs_1, obs_2], ("idor",))
+        assert len(result) == 1
+
     def test_sqli_db_error_in_response(self) -> None:
         from modus.evidence_patterns import detect_evidence_patterns
 

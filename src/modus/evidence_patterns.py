@@ -439,6 +439,31 @@ def _path_only(url: str) -> str:
         return url
 
 
+def _host_and_path(url: str) -> tuple[str, str] | None:
+    """Return ``(host, path)`` for a URL, or ``None`` if unparseable.
+
+    Used as the bucket key for cross-observation pattern detection
+    (auth_bypass, IDOR) so that two observations on the same path
+    but different hosts don't get merged into the same equivalence
+    class. ``foxglove.chaos.anduril.dev/`` returning 200 and
+    ``cyberchef.security.anduril.dev/`` returning 401 are not the
+    "same endpoint with different auth states" — they're two
+    unrelated services that happen to share a path.
+
+    The hostname is lowercased so that ``HOST.example.com`` and
+    ``host.example.com`` bucket together. Path is left case-sensitive
+    (paths are case-sensitive per RFC 3986).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    return host, (parsed.path or "/")
+
+
 def _detect_info_disclosure(
     observations: list[SessionObservation],
 ) -> list[FallbackHypothesis]:
@@ -537,18 +562,28 @@ def _detect_auth_bypass(
 ) -> list[FallbackHypothesis]:
     """Match same-path-different-status pairs where one is 401/403
     and one is 200 — the canonical auth_bypass differential.
+
+    Bucketing is by ``(host, path)`` so that two observations on
+    different hosts that happen to share a path don't get treated
+    as the same endpoint. Two unrelated services both responding at
+    ``/`` (one with 200, one with 401) is not auth_bypass — it's
+    just two unrelated services. The differential only makes sense
+    when the same handler is hit with and without the right auth
+    material.
     """
     out: list[FallbackHypothesis] = []
-    by_path: dict[str, list[SessionObservation]] = {}
+    by_endpoint: dict[tuple[str, str], list[SessionObservation]] = {}
     for obs in observations:
         if obs.kind != "request":
             continue
         url = _request_url(obs)
         if not url:
             continue
-        path = _path_only(url)
-        by_path.setdefault(path, []).append(obs)
-    for path, group in by_path.items():
+        key = _host_and_path(url)
+        if key is None:
+            continue
+        by_endpoint.setdefault(key, []).append(obs)
+    for (host, path), group in by_endpoint.items():
         statuses = {_request_status(o): o for o in group}
         protected = next((o for s, o in statuses.items() if s in (401, 403)), None)
         open_ = next((o for s, o in statuses.items() if s == 200), None)
@@ -561,14 +596,14 @@ def _detect_auth_bypass(
                 evidence_refs=(open_.id, protected.id),
                 rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
                     bug_class="auth_bypass",
-                    endpoint=path,
+                    endpoint=f"{host}{path}",
                     curl_target=_request_url(open_),
                     obs_id=open_.id,
                     status=200,
                     evidence_excerpt=(
-                        f"same path returned 200 and "
+                        f"same host {host!r} same path {path!r} returned 200 and "
                         f"{_request_status(protected)} on different requests "
-                        f"(this run's pool only — same-path differential)"
+                        f"(this run's pool only — same-host same-path differential)"
                     ),
                     impact_note=(
                         "the protected variant correctly enforced auth "
@@ -576,7 +611,7 @@ def _detect_auth_bypass(
                         "endpoint shape"
                     ),
                 ),
-                detector="auth_bypass:same_path_status_differential",
+                detector="auth_bypass:same_host_path_status_differential",
             )
         )
     return out
@@ -588,23 +623,33 @@ def _detect_idor(
     """Match observations on path-shaped endpoints (`/x/{id}`) where
     different ids both return 200 with user-shaped data — the
     classic IDOR pattern.
+
+    Bucketing is by ``(host, template)`` so that ``/users/1`` on
+    one host and ``/users/2`` on a different host don't get treated
+    as enumerable IDs of the same handler. IDOR requires that the
+    same handler returns 200 for IDs the operator doesn't own;
+    cross-host enumeration is two unrelated services with similar
+    URL shapes, not a vulnerability.
     """
     out: list[FallbackHypothesis] = []
-    by_template: dict[str, list[tuple[str, SessionObservation]]] = {}
+    by_handler: dict[tuple[str, str], list[tuple[str, SessionObservation]]] = {}
     for obs in observations:
         if obs.kind != "request":
             continue
         if _request_status(obs) != 200:
             continue
         url = _request_url(obs)
-        path = _path_only(url)
+        host_path = _host_and_path(url)
+        if host_path is None:
+            continue
+        host, path = host_path
         match = _PATH_ID_RE.match(path)
         if not match:
             continue
         template = match.group(1)
         ident = match.group(2)
-        by_template.setdefault(template, []).append((ident, obs))
-    for template, items in by_template.items():
+        by_handler.setdefault((host, template), []).append((ident, obs))
+    for (host, template), items in by_handler.items():
         if len({i for i, _ in items}) < 2:
             continue
         sample = items[0][1]
@@ -619,13 +664,13 @@ def _detect_idor(
                 evidence_refs=tuple(o.id for _, o in items[:4]),
                 rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
                     bug_class="idor",
-                    endpoint=f"{template}/{{id}}",
+                    endpoint=f"{host}{template}/{{id}}",
                     curl_target=_request_url(sample),
                     obs_id=sample.id,
                     status=200,
                     evidence_excerpt=(
-                        f"same handler returned 200 for ids "
-                        f"{ids_seen!r} with user-shaped fields in body"
+                        f"same host {host!r} same handler {template!r} returned "
+                        f"200 for ids {ids_seen!r} with user-shaped fields in body"
                     ),
                     impact_note=(
                         "IDs other than the operator's own resolve to "
