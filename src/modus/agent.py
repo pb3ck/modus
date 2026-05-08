@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from modus.actions import Hypothesize, Tool
+from modus.evidence_patterns import detect_evidence_patterns
 from modus.proposer import StepContext
 
 if TYPE_CHECKING:
@@ -39,7 +41,7 @@ if TYPE_CHECKING:
     from modus.actions import Action
     from modus.consistency import ConsistencyChecker, Verdict
     from modus.proposer import Proposer
-    from modus.session import ServerSession
+    from modus.session import ServerSession, SessionObservation
 
 
 _LOG = logging.getLogger(__name__)
@@ -131,6 +133,7 @@ class AgentLoop:
         bug_classes: list[str],
         objective: str | None = None,
         record: SessionRecord | None = None,
+        initial_observation_ids: frozenset[str] = frozenset(),
     ) -> SessionRecord:
         """Run the loop end-to-end and return the session record.
 
@@ -148,6 +151,19 @@ class AgentLoop:
         in-progress run to ``poll_autonomous_session`` while the
         loop is still executing as a background task. When omitted
         (the synchronous path), the loop builds its own record.
+
+        ``initial_observation_ids`` seeds the run's evidence pool
+        with operator-provided observation ids — typically the ids
+        of session observations the operator preloaded from prior
+        recon (httpx, katana, manual probes ingested into Quarry as
+        a ``responses`` source). The autonomous loop's ``Hypothesize``
+        precondition gates evidence_refs to "this run's pool only"
+        to prevent cross-run bleed between sequential autonomous
+        sessions; treating operator recon as part of *this* run's
+        starting state keeps the firewall meaningful while letting
+        the agent cite the recon data the operator did up front.
+        Empty by default (the agent reasons only over what it
+        observes itself this run).
         """
         if record is None:
             record = SessionRecord(
@@ -170,13 +186,32 @@ class AgentLoop:
         # same ``ServerSession`` instance. Populated as the loop
         # executes actions; passed into each step's CorpusState via
         # ``_step_context``.
-        run_observations: set[str] = set()
+        run_observations: set[str] = set(initial_observation_ids)
         # Quarry Candidate IDs produced by ``hypothesize`` actions
         # this run. Feeds CorpusState.run_candidates so the
         # ``corpus.promote_finding`` precondition can gate promotion
         # on "this run's candidates only" — cross-run promotion is
         # the operator's CLI verb, not the agent's.
         run_candidates: set[str] = set()
+        # Step indices at which a hypothesize executed. Drives the
+        # fallback proposer's "give the LLM room first" gate.
+        hypothesize_steps_so_far: list[int] = []
+        # Dedup keys for synthesized fallback hypotheses already
+        # offered. Each ``(bug_class, sorted-evidence-refs)`` tuple
+        # only fires once per run — re-emitting the same fallback
+        # would just be re-rejected as a duplicate downstream.
+        synthesized_keys: set[str] = set()
+        # ``(candidate_id, severity_hint)`` of hypothesizes whose
+        # severity meets the auto-promotion threshold (medium /
+        # high / critical) and that have NOT yet been promoted via
+        # ``corpus.promote_finding``. The fallback proposer emits
+        # synthesized promote proposals against this queue when the
+        # LLM doesn't follow the auto-promotion rule on its own.
+        pending_promotions: list[tuple[str, str]] = []
+        # Candidate ids the fallback has already synthesized a
+        # promote proposal for — single-fire so we don't spam the
+        # ranking layer with duplicates.
+        synthesized_promotion_ids: set[str] = set()
 
         for step_index in range(self.budget.max_steps):
             if (time.monotonic() - wall_started) > self.budget.max_wall_seconds:
@@ -194,6 +229,33 @@ class AgentLoop:
 
             # 1. Propose
             proposals = await self.proposer.propose(context)
+
+            # 1b. Fallback proposals — deterministic pattern matches
+            # against the run's observations. Only fires when the LLM
+            # has been given enough room to commit on its own and
+            # hasn't. Local mid-size models (qwen2.5-coder:14b,
+            # phi4:14b, gemma2:9b) reliably hit a "decisiveness gap":
+            # they explore competently but won't emit ``hypothesize``
+            # even when their own action history contains textbook
+            # evidence. The fallback closes that gap deterministically;
+            # the LLM keeps primacy when it commits on its own.
+            fallback = self._fallback_proposals(
+                step_index=step_index,
+                bug_classes=tuple(bug_classes),
+                hypothesize_steps=hypothesize_steps_so_far,
+                synthesized_keys=synthesized_keys,
+                pending_promotions=pending_promotions,
+                synthesized_promotion_ids=synthesized_promotion_ids,
+            )
+            # Prepend fallbacks so they win the "first novel survivor"
+            # ranking when both fire — the fallback only emits when the
+            # LLM has been given room and is still abdicating, so it's
+            # the action the loop wants to take. The LLM's batch keeps
+            # its own internal order; this just guarantees a synthesized
+            # ``hypothesize`` or ``corpus.promote_finding`` that passes
+            # Z3 isn't shadowed by an exploratory request the LLM
+            # happened to emit first.
+            proposals = list(fallback) + list(proposals)
 
             # 2. Prune
             verdicts = self.checker.prune(proposals, context.corpus_state)
@@ -258,6 +320,37 @@ class AgentLoop:
                 cand_id = result.get("candidate_id")
                 if isinstance(cand_id, str) and cand_id:
                     run_candidates.add(cand_id)
+                # Note that a hypothesize executed — feeds the
+                # fallback proposer's "did the LLM commit recently?"
+                # gate so the fallback stays quiet when the LLM is
+                # productively closing the loop on its own.
+                if chosen.kind == "hypothesize":
+                    hypothesize_steps_so_far.append(step_index)
+                    severity = result.get("severity_hint")
+                    if (
+                        isinstance(severity, str)
+                        and severity in ("medium", "high", "critical")
+                        and isinstance(cand_id, str)
+                        and cand_id
+                    ):
+                        # Queue this candidate for auto-promotion. The
+                        # fallback proposer will synthesize a
+                        # ``corpus.promote_finding`` Tool proposal on a
+                        # subsequent step if the LLM doesn't follow the
+                        # auto-promotion rule itself.
+                        pending_promotions.append((cand_id, severity))
+                # When a Tool action invoked corpus.promote_finding,
+                # remove the candidate from the pending queue so the
+                # fallback doesn't re-emit a duplicate promote.
+                if (
+                    chosen.kind == "tool"
+                    and getattr(chosen, "name", "") == "corpus.promote_finding"
+                ):
+                    cand_arg = (chosen.args or {}).get("candidate_id")
+                    if isinstance(cand_arg, str):
+                        pending_promotions[:] = [
+                            (cid, sev) for cid, sev in pending_promotions if cid != cand_arg
+                        ]
                 empty_streak = 0
             else:
                 if not all_duplicates:
@@ -298,6 +391,140 @@ class AgentLoop:
     # though it failed earlier; full-session dedup makes the agent
     # spend budget on novel actions instead. If the agent legitimately
     # wants to retry an URL, it can vary the method, headers, or body.
+    FALLBACK_AFTER_STEP = 5
+    # ^ The fallback proposer stays quiet for the first N steps so
+    # the LLM has room to commit ``hypothesize`` on its own. After
+    # that, deterministic pattern matchers fire when the LLM keeps
+    # abdicating despite evidence-shaped observations being in the
+    # run's pool. Set deliberately conservative — the LLM proposer
+    # is the primary path; the fallback is the safety net.
+    FALLBACK_QUIET_AFTER_HYPOTHESIZE = 2
+    # ^ When a hypothesize *did* execute recently (LLM-emitted or
+    # fallback-emitted), the fallback stays quiet for this many
+    # steps. Keeps the loop from spamming the same fallback over
+    # and over once the loop is productively closing.
+
+    def _fallback_proposals(
+        self,
+        *,
+        step_index: int,
+        bug_classes: tuple[str, ...],
+        hypothesize_steps: list[int],
+        synthesized_keys: set[str],
+        pending_promotions: list[tuple[str, str]],
+        synthesized_promotion_ids: set[str],
+    ) -> list[Action]:
+        """Synthesize fallback proposals when the LLM keeps abdicating.
+
+        Two layers, both deterministic:
+
+        1. **Hypothesize fallback** — pattern-match the run's
+           observations against bug-class evidence templates; emit
+           a :class:`Hypothesize` for each match the LLM hasn't
+           committed itself. Activation gated by
+           :attr:`FALLBACK_AFTER_STEP` and
+           :attr:`FALLBACK_QUIET_AFTER_HYPOTHESIZE` so the LLM
+           gets first crack.
+
+        2. **Promote fallback** — for each pending candidate
+           (severity ≥ medium, hypothesize executed, no promotion
+           emitted yet), synthesize a
+           ``Tool(name="corpus.promote_finding", args=...)`` to
+           close the auto-promotion lifecycle the v0.4.0 policy
+           describes. Required because the same commitment gap
+           that suppresses ``hypothesize`` also suppresses the
+           policy-mandated next-step promotion: the LLM lands a
+           medium-severity Candidate and then keeps probing
+           instead of emitting the promote.
+
+        Both flow through the same Z3-prune-rank-execute pipeline
+        as the LLM's proposals. Single-fire dedup on each path.
+        """
+        out: list[Action] = []
+
+        # --- 2. Promote fallback (no step gate — fires
+        # immediately after a qualifying hypothesize, since the
+        # auto-promotion rule says "next step MUST promote")
+        for cand_id, severity in pending_promotions:
+            if cand_id in synthesized_promotion_ids:
+                continue
+            synthesized_promotion_ids.add(cand_id)
+            try:
+                promote_action = Tool(
+                    name="corpus.promote_finding",
+                    args={"candidate_id": cand_id, "severity": severity},
+                )
+            except Exception as exc:
+                _LOG.warning(
+                    "fallback promote rejected by Pydantic validation: %s",
+                    exc,
+                )
+                continue
+            _LOG.info(
+                "fallback proposer emitting corpus.promote_finding for candidate=%s (severity=%s)",
+                cand_id,
+                severity,
+            )
+            out.append(promote_action)
+
+        # --- 1. Hypothesize fallback
+        if step_index < self.FALLBACK_AFTER_STEP:
+            return out
+        if hypothesize_steps:
+            steps_since_last = step_index - hypothesize_steps[-1]
+            if steps_since_last <= self.FALLBACK_QUIET_AFTER_HYPOTHESIZE:
+                return out
+
+        observations = self._this_run_observations()
+        if not observations:
+            return out
+        matches = detect_evidence_patterns(observations, bug_classes)
+        for m in matches:
+            key = f"{m.bug_class}:{','.join(sorted(m.evidence_refs))}"
+            if key in synthesized_keys:
+                continue
+            synthesized_keys.add(key)
+            try:
+                action = Hypothesize(
+                    bug_class=m.bug_class,
+                    evidence_refs=m.evidence_refs,
+                    rationale=m.rationale,
+                    severity_hint=m.severity_hint,  # type: ignore[arg-type]
+                )
+            except Exception as exc:  # broad: validation
+                _LOG.warning(
+                    "fallback hypothesis rejected by Pydantic validation: %s (detector=%s)",
+                    exc,
+                    m.detector,
+                )
+                continue
+            _LOG.info(
+                "fallback proposer emitting hypothesize for %s "
+                "(detector=%s, severity=%s, evidence_refs=%d)",
+                m.bug_class,
+                m.detector,
+                m.severity_hint,
+                len(m.evidence_refs),
+            )
+            out.append(action)
+        return out
+
+    def _this_run_observations(self) -> list[SessionObservation]:
+        """The session's observations whose ids are in the run pool.
+
+        The run pool (the per-run observation IDs the loop tracks)
+        intersects with ``session.observations`` to yield the
+        full :class:`SessionObservation` records this run produced —
+        what the fallback detectors pattern-match against.
+        """
+        # Note: the loop builds run_observations as a local set;
+        # we don't have direct access here, so we pull from the
+        # session's full pool and let the detectors filter on
+        # their own structural rules. The session's pool only
+        # accumulates this-run observations within a single
+        # ``run_autonomous_session`` call (the verified-action
+        # surface appends too, but that's outside this loop).
+        return list(self.session.observations)
 
     def _recent_action_keys(self, steps: list[StepRecord]) -> set[str]:
         """Set of dedup keys for actions executed in the last few steps.

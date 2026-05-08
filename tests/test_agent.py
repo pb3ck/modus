@@ -311,3 +311,108 @@ class TestEvidenceRefsScopedToRun:
         # The recording executor never saw the action — Z3 rejected
         # it before execution.
         assert executor.calls == []
+
+
+class TestFallbackProposer:
+    """The deterministic fallback fires when the LLM keeps abdicating
+    despite evidence-shaped observations being in the run's pool.
+    """
+
+    async def test_hypothesize_fallback_fires_after_warmup_steps(self) -> None:
+        from modus.session import SessionObservation
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        # Pre-load a seeded observation that matches the
+        # info_disclosure pattern (unauth 200 with a version banner).
+        seed_id = "obs-seed-version"
+        session.observations.append(
+            SessionObservation(
+                id=seed_id,
+                kind="request",
+                payload={
+                    "url": "http://target.example.com/version",
+                    "status": 200,
+                    "response_body": '{"version":"1.2.3"}',
+                    "request_headers": {},
+                },
+            )
+        )
+        # FixedProposer emits only an unrelated probe — never a
+        # hypothesize. The fallback must close the loop.
+        proposer = FixedProposer([Probe(target="target.example.com")] * 20)
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=8, max_consecutive_empty_steps=10),
+        )
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            initial_observation_ids=frozenset({seed_id}),
+        )
+        # The fallback should have fired by the FALLBACK_AFTER_STEP
+        # gate (step 5). At least one hypothesize executed.
+        executed_kinds = [a.kind for a in executor.calls]
+        assert "hypothesize" in executed_kinds, (
+            f"fallback didn't emit a hypothesize despite seed observation; "
+            f"executed kinds: {executed_kinds}"
+        )
+        # The hypothesize action was the synthesized one — its
+        # evidence_refs should reference the seeded observation.
+        hyp = next(a for a in executor.calls if a.kind == "hypothesize")
+        assert seed_id in hyp.evidence_refs
+
+    async def test_fallback_stays_quiet_during_warmup(self) -> None:
+        # Before FALLBACK_AFTER_STEP, the fallback shouldn't fire
+        # even with matching observations in the pool — gives the
+        # LLM proposer first crack at committing on its own.
+        from modus.session import SessionObservation
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        seed_id = "obs-seed-version-early"
+        session.observations.append(
+            SessionObservation(
+                id=seed_id,
+                kind="request",
+                payload={
+                    "url": "http://target.example.com/version",
+                    "status": 200,
+                    "response_body": '{"version":"1.2.3"}',
+                    "request_headers": {},
+                },
+            )
+        )
+        proposer = FixedProposer([Probe(target="target.example.com")] * 20)
+        executor = _RecordingExecutor()
+        # Budget caps the loop BELOW the fallback's warmup gate.
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=3, max_consecutive_empty_steps=10),
+        )
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            initial_observation_ids=frozenset({seed_id}),
+        )
+        # Inside the warmup window the fallback should be quiet —
+        # only the FixedProposer's probe actions should execute.
+        executed_kinds = [a.kind for a in executor.calls]
+        assert "hypothesize" not in executed_kinds, (
+            f"fallback fired during warmup; executed kinds: {executed_kinds}"
+        )

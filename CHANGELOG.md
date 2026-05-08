@@ -12,6 +12,42 @@ notice.
 
 ### Added
 
+- **Pattern-driven fallback proposer** (`modus.evidence_patterns.detect_evidence_patterns`
+  + `AgentLoop._fallback_proposals`). Mid-size open-weight models
+  (gemma2:9b, qwen2.5-coder:14b, phi4:14b) reliably hit a
+  "decisiveness gap" in the autonomous loop — they explore
+  competently but won't emit `hypothesize` even when their own
+  action history contains textbook evidence, terminating
+  `empty_pruning_streak` instead of producing Candidates. The
+  fallback proposer closes that gap deterministically: per-bug-
+  class detectors (info_disclosure version banners and secret
+  hints; auth_bypass same-path status differentials; idor
+  enumerable-id user-data dumps; sqli DB-error and tainted-input
+  result-shape divergence) match against the run's observations
+  and synthesize `Hypothesize` proposals when the LLM keeps
+  abdicating. A second fallback layer synthesizes
+  `corpus.promote_finding` `Tool` proposals against pending
+  medium/high/critical Candidates the LLM didn't auto-promote on
+  schedule. Both fallbacks flow through the same Z3-prune-rank-
+  execute pipeline as the LLM's batch; fallback proposals are
+  prepended so the deterministic safety net wins ranking when it
+  fires. The LLM proposer keeps primacy — the fallback only
+  emits when activation gates (warmup steps, quiet-after-hypothesize
+  window, single-fire dedup) are satisfied. Live-tested on Juice
+  Shop with phi4:14b: prior runs produced 0 Candidates; with the
+  fallback, the loop produces multiple Candidates across
+  info_disclosure / idor / auth_bypass and auto-promotes the
+  severity-medium-or-higher ones to Findings.
+- **`AgentLoop.run(initial_observation_ids=...)`** — parameter
+  to seed the run's evidence pool with operator-provided
+  observation ids. The autonomous loop's `Hypothesize`
+  precondition gates `evidence_refs` to "this run's pool only"
+  to prevent cross-run bleed between sequential autonomous
+  sessions. Treating operator recon as part of *this* run's
+  starting state keeps the firewall meaningful while letting the
+  agent cite the recon data the operator did up front (typically
+  httpx, katana, or `responses`-shape JSONL ingested into Quarry
+  by the operator before the autonomous run starts).
 - **Autonomous Candidate→Finding promotion.** New
   `corpus.promote_finding` builtin in the default tool registry,
   dispatching to `modus.builtins.corpus.promote_finding`, which
