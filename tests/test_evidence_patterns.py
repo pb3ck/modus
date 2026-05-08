@@ -166,3 +166,198 @@ class TestProposerIntegration:
         user_prompt = proposer._user_prompt(ctx)
         assert "Closing rule" not in user_prompt
         assert "Recognition templates" not in user_prompt
+
+
+class TestDetectEvidencePatterns:
+    """Inverse-detection tests for the fallback proposer.
+
+    These exercise the deterministic pattern matchers that fire
+    when the LLM proposer keeps abdicating despite evidence-shaped
+    observations being in the run pool. Each detector is exercised
+    against a synthetic SessionObservation crafted to match (or
+    deliberately not-match) one bug-class template.
+    """
+
+    @staticmethod
+    def _obs(
+        obs_id: str,
+        url: str,
+        status: int,
+        body: str = "",
+        request_headers: dict | None = None,
+    ):
+        from modus.session import SessionObservation
+
+        return SessionObservation(
+            id=obs_id,
+            kind="request",
+            payload={
+                "url": url,
+                "status": status,
+                "response_body": body,
+                "request_headers": request_headers or {},
+            },
+        )
+
+    def test_info_disclosure_version_banner(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-1",
+            "http://target/rest/admin/application-version",
+            200,
+            body='{"version":"19.2.1"}',
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert len(result) == 1
+        assert result[0].bug_class == "info_disclosure"
+        assert result[0].severity_hint == "low"
+        assert result[0].evidence_refs == ("obs-1",)
+        assert "version" in result[0].rationale.lower()
+
+    def test_info_disclosure_secret_token(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-2",
+            "http://target/api/leak",
+            200,
+            body='{"api_key":"sk-live-deadbeef-000"}',
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert len(result) == 1
+        assert result[0].severity_hint == "high"
+
+    def test_info_disclosure_user_object_dump(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-3",
+            "http://target/api/Feedbacks",
+            200,
+            body=(
+                '{"status":"success","data":'
+                '[{"UserId":1,"comment":"hi"},{"UserId":2,"comment":"hey"}]}'
+            ),
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert len(result) == 1
+        assert result[0].severity_hint == "medium"
+        assert result[0].evidence_refs == ("obs-3",)
+
+    def test_info_disclosure_skips_authenticated_request(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-4",
+            "http://target/rest/admin/application-version",
+            200,
+            body='{"version":"19.2.1"}',
+            request_headers={"Authorization": "Bearer token"},
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert result == []
+
+    def test_auth_bypass_same_path_status_diff(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_protected = self._obs("obs-5", "http://target/api/Users/1", 401)
+        obs_open = self._obs("obs-6", "http://target/api/Users/1", 200, body='{"data":[]}')
+        result = detect_evidence_patterns([obs_protected, obs_open], ("auth_bypass",))
+        assert len(result) == 1
+        assert result[0].bug_class == "auth_bypass"
+        assert set(result[0].evidence_refs) == {"obs-5", "obs-6"}
+
+    def test_auth_bypass_skips_when_only_one_status_class(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_a = self._obs("obs-7", "http://target/api/Users/1", 401)
+        obs_b = self._obs("obs-8", "http://target/api/Users/2", 401)
+        result = detect_evidence_patterns([obs_a, obs_b], ("auth_bypass",))
+        assert result == []
+
+    def test_idor_enumerable_user_data(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_1 = self._obs(
+            "obs-9",
+            "http://target/api/Users/1",
+            200,
+            body='{"UserId":1,"email":"a@x.com"}',
+        )
+        obs_2 = self._obs(
+            "obs-10",
+            "http://target/api/Users/2",
+            200,
+            body='{"UserId":2,"email":"b@x.com"}',
+        )
+        result = detect_evidence_patterns([obs_1, obs_2], ("idor",))
+        assert len(result) == 1
+        assert result[0].bug_class == "idor"
+        assert result[0].severity_hint == "high"
+        assert set(result[0].evidence_refs) == {"obs-9", "obs-10"}
+
+    def test_sqli_db_error_in_response(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-11",
+            "http://target/rest/products/search?q=apple%27%29%29",
+            500,
+            body='Error: SQLITE_ERROR: near "))": syntax error',
+        )
+        result = detect_evidence_patterns([obs], ("sqli",))
+        assert len(result) == 1
+        assert result[0].bug_class == "sqli"
+        assert result[0].severity_hint == "high"
+
+    def test_sqli_differential_empty_on_taint(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        baseline = self._obs(
+            "obs-12",
+            "http://target/rest/products/search?q=apple",
+            200,
+            body='{"status":"success","data":[{"id":1,"name":"Apple Juice"}]}',
+        )
+        tainted = self._obs(
+            "obs-13",
+            "http://target/rest/products/search?q=apple%27%29%29%20--",
+            200,
+            body='{"status":"success","data":[]}',
+        )
+        result = detect_evidence_patterns([baseline, tainted], ("sqli",))
+        assert len(result) == 1
+        assert result[0].bug_class == "sqli"
+        assert result[0].evidence_refs == ("obs-13",)
+
+    def test_bug_class_filter_applies(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-14",
+            "http://target/rest/admin/application-version",
+            200,
+            body='{"version":"19.2.1"}',
+        )
+        result = detect_evidence_patterns([obs], ("idor",))
+        assert result == []
+
+    def test_empty_observation_pool_returns_empty(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        result = detect_evidence_patterns([], ("auth_bypass", "idor"))
+        assert result == []
+
+    def test_no_bug_classes_runs_all_detectors(self) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-15",
+            "http://target/rest/admin/application-version",
+            200,
+            body='{"version":"19.2.1"}',
+        )
+        result = detect_evidence_patterns([obs], ())
+        assert len(result) == 1
+        assert result[0].bug_class == "info_disclosure"
