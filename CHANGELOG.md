@@ -10,6 +10,31 @@ notice.
 
 ## [Unreleased]
 
+### Added
+
+- **`recon_jsonl_path` argument on `run_autonomous_session` /
+  `start_autonomous_session` MCP tools.** Operators driving
+  Modus from an MCP host (Claude Desktop, etc.) can now pass
+  the path to a `responses`-shape JSONL file (records of
+  `{url, status, headers, body}` — same shape Quarry's
+  `responses` ingest adapter accepts) and Modus will materialize
+  each record into a `SessionObservation`, populate the
+  autonomous loop's `initial_observation_ids`, and proceed —
+  no Python driver script needed. The seeded observations are
+  citable in `hypothesize` actions in the same run and feed the
+  deterministic fallback proposer. Closes the operator-UX gap
+  surfaced during the v0.4.0a1 live verification: the autonomous
+  loop's per-run-pool firewall meant operators couldn't drive
+  the seeded-corpus flow over MCP without bypassing the tool
+  surface entirely. The result payload reports
+  `seeded_observation_count` and (on failure) a `recon_warning`
+  string with a human-readable diagnosis. Empty / missing path
+  is a no-op, preserving prior behavior.
+- **`docs/quickstart.md` §4** rewritten with the recon →
+  ingest → autonomous workflow, including a 30-line Python
+  recon driver an operator can copy-paste against any HTTP
+  target.
+
 ## [0.4.0a1] — 2026-05-08
 
 Autonomous Candidate→Finding alpha. The autonomous loop now

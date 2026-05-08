@@ -613,6 +613,238 @@ class TestAutonomousToolGate:
         assert "error" in result
 
 
+class TestReconJsonlSeeding:
+    """The autonomous-session MCP tools accept a ``recon_jsonl_path``
+    argument that materializes a `responses`-shape JSONL into the
+    run's starting evidence pool. Lets MCP-host operators drive the
+    seeded-corpus flow without a Python driver script.
+    """
+
+    async def test_run_autonomous_session_seeds_from_jsonl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        # Write a 2-record JSONL the way the recon driver does.
+        recon = tmp_path / "recon.jsonl"
+        recon.write_text(
+            json.dumps(
+                {
+                    "url": "http://target.example.com/api/Feedbacks",
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": '{"data":[{"UserId":1,"comment":"hi"}]}',
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "url": "http://target.example.com/version",
+                    "status": 200,
+                    "headers": {},
+                    "body": '{"version":"1.0.0"}',
+                }
+            )
+            + "\n"
+        )
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        result = await server._dispatch(
+            "run_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["info_disclosure"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+                "recon_jsonl_path": str(recon),
+            },
+        )
+        assert result["seeded_observation_count"] == 2
+        assert "recon_warning" not in result
+        # The seeded observations land in session.observations with
+        # the synthetic id prefix and are usable as evidence_refs in
+        # the same run (the precondition gate is satisfied because
+        # they're in the run's pool).
+        seeded = [o for o in session.observations if o.id.startswith("http-recon-seed-")]
+        assert len(seeded) == 2
+        assert seeded[0].payload["status"] == 200
+        assert "Feedbacks" in seeded[0].payload["url"]
+
+    async def test_run_autonomous_session_recon_path_missing_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        result = await server._dispatch(
+            "run_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["info_disclosure"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+                "recon_jsonl_path": "/nonexistent/path/recon.jsonl",
+            },
+        )
+        # Missing file is non-fatal: surfaces as recon_warning, the
+        # run continues with an empty seeded pool.
+        assert result["seeded_observation_count"] == 0
+        assert "recon_warning" in result
+        assert "not a readable file" in result["recon_warning"]
+        # No seeded observations.
+        assert not [o for o in session.observations if o.id.startswith("http-recon-seed-")]
+
+    async def test_run_autonomous_session_recon_path_skips_malformed_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        recon = tmp_path / "mixed.jsonl"
+        recon.write_text(
+            json.dumps(
+                {
+                    "url": "http://target.example.com/version",
+                    "status": 200,
+                    "headers": {},
+                    "body": '{"version":"1.0.0"}',
+                }
+            )
+            + "\n"
+            + "this is not json at all\n"
+            + "\n"  # blank line
+            + json.dumps([1, 2, 3])  # JSON but not an object
+            + "\n"
+            + json.dumps(
+                {
+                    "url": "http://target.example.com/api/Users",
+                    "status": 401,
+                    "headers": {},
+                    "body": "unauthorized",
+                }
+            )
+            + "\n"
+        )
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        result = await server._dispatch(
+            "run_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["info_disclosure"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+                "recon_jsonl_path": str(recon),
+            },
+        )
+        # The two well-formed records are kept; malformed / non-object
+        # lines are silently skipped (matching the responses adapter's
+        # hygiene).
+        assert result["seeded_observation_count"] == 2
+        seeded = [o for o in session.observations if o.id.startswith("http-recon-seed-")]
+        assert len(seeded) == 2
+
+    async def test_run_autonomous_session_no_recon_path_is_no_op(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from modus.actions import Probe
+        from modus.proposer import FixedProposer
+
+        server, session = _server_with(
+            quarry=_FixedCorpusClient(),
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        def _stub_make_proposer(
+            *, llm: object, scope: object, mcp_session: object = None
+        ) -> object:
+            return FixedProposer([Probe(target="target.example.com")])
+
+        from modus import server as server_module
+
+        monkeypatch.setattr(server_module, "make_proposer", _stub_make_proposer)
+
+        # No recon_jsonl_path argument — preserves prior behavior.
+        result = await server._dispatch(
+            "run_autonomous_session",
+            {
+                "target": "demo",
+                "bug_classes": ["info_disclosure"],
+                "budget": {"max_steps": 1, "max_wall_seconds": 5},
+            },
+        )
+        assert result["seeded_observation_count"] == 0
+        assert "recon_warning" not in result
+        assert not [o for o in session.observations if o.id.startswith("http-recon-seed-")]
+
+    def test_input_schema_advertises_recon_jsonl_path(self) -> None:
+        from modus.server import _autonomous_session_input_schema
+
+        schema = _autonomous_session_input_schema()
+        assert "recon_jsonl_path" in schema["properties"]
+        assert schema["properties"]["recon_jsonl_path"]["type"] == "string"
+        # Not in `required` — recon_jsonl_path is optional.
+        assert "recon_jsonl_path" not in schema["required"]
+
+
 # ----------------------------------------------------------- llm config
 
 

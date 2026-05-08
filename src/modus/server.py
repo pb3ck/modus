@@ -36,7 +36,8 @@ import uuid
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 from mcp import types as mcp_types
 from mcp.server import Server
@@ -60,10 +61,6 @@ from modus.executor import HttpExecutor
 from modus.proposer import make_proposer
 from modus.session import AsyncSession, ServerSession, SessionCandidate, SessionObservation
 from modus.tool_executor import ToolExecutor
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 _LOG = logging.getLogger(__name__)
 
@@ -190,6 +187,28 @@ def _autonomous_session_input_schema() -> dict[str, Any]:
                     "max_steps": {"type": "integer", "minimum": 1},
                     "max_wall_seconds": {"type": "number", "minimum": 1},
                 },
+            },
+            "recon_jsonl_path": {
+                "type": "string",
+                "description": (
+                    "Optional path to a `responses`-shape JSONL file "
+                    "(records of `{url, status, headers, body}`) that "
+                    "the operator gathered during prior recon — typically "
+                    "the same file ingested into Quarry as a `responses` "
+                    "source. When provided, each record is materialized "
+                    "into a SessionObservation and its id is added to the "
+                    "run's initial evidence pool, so the agent can cite "
+                    "operator-recon evidence in `hypothesize` actions and "
+                    "the deterministic fallback proposer can pattern-match "
+                    "against it. The Hypothesize precondition still gates "
+                    "evidence_refs to *this* run's pool — operator recon "
+                    "is treated as part of this run's starting state, "
+                    "not as bleed from a prior autonomous run. Empty / "
+                    "missing is a no-op (the agent reasons only over what "
+                    "it observes itself this run). Path is read from the "
+                    "MCP server process — operators driving Modus from a "
+                    "remote host need a path the server can see."
+                ),
             },
         },
         "required": ["target", "bug_classes"],
@@ -823,6 +842,11 @@ class ModusServer:
             max_steps=int(budget_args.get("max_steps", Budget().max_steps)),
             max_wall_seconds=float(budget_args.get("max_wall_seconds", Budget().max_wall_seconds)),
         )
+        recon_path = arguments.get("recon_jsonl_path")
+        seeded_ids: frozenset[str] = frozenset()
+        recon_warning: str | None = None
+        if isinstance(recon_path, str) and recon_path.strip():
+            seeded_ids, recon_warning = _seed_observations_from_jsonl(self.session, recon_path)
         loop = AgentLoop(
             proposer=proposer,
             checker=self.checker,
@@ -830,8 +854,13 @@ class ModusServer:
             execute_action=self._execute_action_for_loop,
             budget=budget,
         )
-        record = await loop.run(target_name=target, bug_classes=bug_classes, objective=objective)
-        return {
+        record = await loop.run(
+            target_name=target,
+            bug_classes=bug_classes,
+            objective=objective,
+            initial_observation_ids=seeded_ids,
+        )
+        result: dict[str, Any] = {
             "session": record.to_payload(),
             "candidates": [
                 {
@@ -842,7 +871,11 @@ class ModusServer:
                 }
                 for c in self.session.candidates
             ],
+            "seeded_observation_count": len(seeded_ids),
         }
+        if recon_warning is not None:
+            result["recon_warning"] = recon_warning
+        return result
 
     def _start_autonomous_session(self, proposer: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         """Kick off ``AgentLoop.run`` as a detached asyncio task.
@@ -868,6 +901,11 @@ class ModusServer:
             max_steps=int(budget_args.get("max_steps", Budget().max_steps)),
             max_wall_seconds=float(budget_args.get("max_wall_seconds", Budget().max_wall_seconds)),
         )
+        recon_path = arguments.get("recon_jsonl_path")
+        seeded_ids: frozenset[str] = frozenset()
+        recon_warning: str | None = None
+        if isinstance(recon_path, str) and recon_path.strip():
+            seeded_ids, recon_warning = _seed_observations_from_jsonl(self.session, recon_path)
 
         started_at = datetime.now(UTC)
         record = SessionRecord(
@@ -890,6 +928,7 @@ class ModusServer:
                 bug_classes=bug_classes,
                 objective=objective,
                 record=record,
+                initial_observation_ids=seeded_ids,
             )
         )
 
@@ -904,13 +943,17 @@ class ModusServer:
             candidate_start_index=len(self.session.candidates),
         )
         self.session.async_sessions[session_id] = async_session
-        return {
+        result: dict[str, Any] = {
             "session_id": session_id,
             "started_at": started_at.isoformat(),
             "target_name": target,
             "bug_classes": list(bug_classes),
             "status": "running",
+            "seeded_observation_count": len(seeded_ids),
         }
+        if recon_warning is not None:
+            result["recon_warning"] = recon_warning
+        return result
 
     def _poll_autonomous_session(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Snapshot an in-flight (or completed) async session.
@@ -1234,6 +1277,81 @@ def _severity_to_score(severity_hint: str | None) -> float:
         "low": 0.3,
         "info": 0.1,
     }.get(severity_hint or "", 0.5)
+
+
+def _seed_observations_from_jsonl(
+    session: ServerSession, recon_jsonl_path: str
+) -> tuple[frozenset[str], str | None]:
+    """Materialize a ``responses``-shape JSONL into SessionObservations.
+
+    Reads ``{url, status, headers?, body?}`` records (the same shape
+    Quarry's ``responses`` ingest adapter accepts), appends one
+    :class:`SessionObservation` per record to ``session.observations``,
+    and returns the set of synthesized observation ids the
+    ``AgentLoop.run(initial_observation_ids=...)`` parameter expects.
+
+    Returns ``(ids, error_message)``. On success ``error_message`` is
+    ``None``; on failure ``ids`` is empty and ``error_message``
+    surfaces a human-readable diagnosis the autonomous-session tool
+    handler can include in its result. Failures are non-fatal — an
+    unreadable / malformed JSONL doesn't kill the run; the loop just
+    starts with an empty pool, same as if no recon path had been
+    provided.
+
+    The materialized records use synthetic ids of the form
+    ``http-recon-seed-NNN`` so they don't collide with the
+    ``http-<uuid>`` ids the runtime executor produces. Re-running the
+    same JSONL twice would re-add observations with new
+    ``-NNN`` suffixes; that's intentional — operators who don't want
+    duplicates should not re-pass the path on a subsequent
+    ``run_autonomous_session``.
+    """
+    path = Path(recon_jsonl_path).expanduser()
+    if not path.is_file():
+        return frozenset(), f"recon_jsonl_path {recon_jsonl_path!r} is not a readable file"
+    seeded_ids: set[str] = set()
+    next_index = sum(1 for o in session.observations if o.id.startswith("http-recon-seed-"))
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # skip malformed lines, same hygiene as the responses adapter
+                if not isinstance(rec, dict):
+                    continue
+                obs_id = f"http-recon-seed-{next_index:03d}"
+                next_index += 1
+                payload: dict[str, Any] = {
+                    "id": obs_id,
+                    "observation_id": obs_id,
+                    "url": str(rec.get("url", "")),
+                    "method": str(rec.get("method", "GET")),
+                    "status": int(rec.get("status", 0)) if rec.get("status") is not None else 0,
+                    "request_headers": (
+                        dict(rec["request_headers"])
+                        if isinstance(rec.get("request_headers"), dict)
+                        else {}
+                    ),
+                    "request_body": rec.get("request_body"),
+                    "response_headers": (
+                        dict(rec["headers"]) if isinstance(rec.get("headers"), dict) else {}
+                    ),
+                    "response_body": str(rec.get("body", "")),
+                    "elapsed_ms": 0.0,
+                    "error": None,
+                    "redirect_chain": [],
+                }
+                session.observations.append(
+                    SessionObservation(id=obs_id, kind="request", payload=payload)
+                )
+                seeded_ids.add(obs_id)
+    except OSError as exc:
+        return frozenset(), f"failed to read recon_jsonl_path {recon_jsonl_path!r}: {exc}"
+    return frozenset(seeded_ids), None
 
 
 __all__ = ["ModusServer", "serve"]
