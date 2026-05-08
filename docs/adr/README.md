@@ -37,6 +37,15 @@ Every ADR has the following sections:
   — Modus is an autonomous agent exposed as an MCP server. The
   autonomous-session tools and verified-action tools are both
   always present. Extends ADR-0002.
+- [`0004-tools-first-action-grammar.md`](./0004-tools-first-action-grammar.md)
+  — open registry-keyed action vocabulary with shell, MCP-passthrough,
+  and builtin backends. The closed typed-action union from ADR 0001
+  becomes a fast path inside the open grammar.
+- [`0005-recon-mode-scope-and-two-phase-autonomous-session.md`](./0005-recon-mode-scope-and-two-phase-autonomous-session.md)
+  — recon-mode scope (read-only OSINT under wildcard authorization)
+  + two-phase autonomous session (agent proposes Tier A/B/C
+  expansion, operator commits in one bounded review). Status:
+  proposed.
 
 ## When to write an ADR
 
