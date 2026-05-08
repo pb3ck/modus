@@ -1,6 +1,6 @@
 [project]
 name = "modus"
-version = "0.4.0a2"
+version = "0.4.0"
 description = "Autonomous offensive agent with an open tool registry, formal consistency checking, and a Quarry-backed corpus."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,7 +21,7 @@ keywords = [
     "z3",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",

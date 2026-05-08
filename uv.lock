@@ -569,7 +569,7 @@ wheels = [
 
 [[package]]
 name = "modus"
-version = "0.4.0a2"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
