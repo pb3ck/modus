@@ -46,6 +46,12 @@ Every ADR has the following sections:
   + two-phase autonomous session (agent proposes Tier A/B/C
   expansion, operator commits in one bounded review). Status:
   proposed.
+- [`0006-engagement-coordinator-session-of-sessions.md`](./0006-engagement-coordinator-session-of-sessions.md)
+  — engagement coordinator: deterministic state machine driving
+  LLM decisions within bounded transitions; persisted in Quarry;
+  parallel CLI + MCP surfaces. Generalises the autonomy claim
+  from "within a session" (ADR 0001/0002) to "across a multi-
+  cycle engagement." Depends on ADR 0005. Status: proposed.
 
 ## When to write an ADR
 
