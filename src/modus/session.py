@@ -338,6 +338,8 @@ class ServerSession:
             known_observations=observation_ids,
             known_evidence=frozenset(),
             known_referents=hosts | observation_ids,
+            recon_mode=self.scope.recon_mode,
+            denied_patterns=self.scope.denied_patterns,
         )
 
     @classmethod

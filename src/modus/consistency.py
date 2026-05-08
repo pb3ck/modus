@@ -40,7 +40,7 @@ from modus.actions import (
 )
 
 if TYPE_CHECKING:
-    from modus.scope import AllowedEndpoint, ScopePolicy
+    from modus.scope import AllowedEndpoint, DeniedPattern, ScopePolicy
     from modus.tools import ToolRegistry
 
 
@@ -103,6 +103,18 @@ class CorpusState:
     non-autonomous paths; populated by :meth:`AgentLoop.run`
     each time a hypothesize executes and Quarry returns a
     ``candidate_id``."""
+    recon_mode: bool = False
+    """ADR 0005: when True, the ``Request`` precondition rejects
+    unconditionally and the tool-action dispatcher gates ``Tool``
+    actions to the ``read`` side-effect tier. Sourced from
+    :attr:`ScopePolicy.recon_mode`. Defaults to False so the
+    verified-action surface and the ``modus action validate`` CLI
+    flow get the v0.4 behaviour unchanged."""
+    denied_patterns: tuple[DeniedPattern, ...] = ()
+    """ADR 0005: deny-by-pattern set, applied as a defence-in-depth
+    floor on ``Request`` actions even when the host is in
+    ``in_scope_assets``. Sourced from
+    :attr:`ScopePolicy.denied_patterns`."""
 
     @classmethod
     def empty(cls) -> CorpusState:
@@ -231,6 +243,24 @@ class ConsistencyChecker:
             # malformed — they may assume the args shape.
             return preconds
         preconds.append((f"tool_args_valid:{spec.name}", True))
+        # ADR 0005: in recon mode, only ``read`` side-effect tools
+        # may run. ``write`` and ``active`` tools are gated off so
+        # the agent can do passive enumeration (subfinder, crt.sh
+        # fetch, OSINT) but cannot generate side effects against
+        # wildcard-matched hosts before the operator has committed
+        # the scope-expansion proposal. The check goes here (after
+        # args validation, before the tool's per-spec preconditions)
+        # so that an in-scope-but-wrong-tier tool fails with a clear
+        # ``recon_mode_tool_side_effect`` label rather than failing
+        # mid-precondition with whatever the tool itself checks.
+        if state.recon_mode and spec.side_effect != "read":
+            preconds.append(
+                (
+                    f"recon_mode_tool_side_effect:{spec.name}:{spec.side_effect}",
+                    False,
+                )
+            )
+            return preconds
         preconds.extend(spec.preconditions(action.args, self.scope, state))
         return preconds
 
@@ -285,13 +315,23 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
         ]
 
     if isinstance(action, Request):
-        # Two checks: hostname-only membership (for back-compat with
-        # scopes that don't specify port/tls) AND full-endpoint
-        # membership (when allowed_endpoints is populated, which
-        # tightens scope down to specific scheme+port combinations).
-        # Tests and CLI flows that don't populate allowed_endpoints
-        # see only the hostname check, matching the original
-        # behaviour.
+        # Four checks, in order of decisiveness:
+        #
+        #   1. ``recon_mode_allows_request`` — ADR 0005's recon-mode
+        #      gates ``Request`` off entirely. A True value means
+        #      ``recon_mode`` is False (probing is allowed); a False
+        #      value means recon mode is on and Request is rejected.
+        #   2. ``host_not_denied:<host>`` — ADR 0005's
+        #      defence-in-depth floor. Even when a host is in
+        #      ``allowed_assets``, a denied-pattern match rejects
+        #      the probe. Two filters, both must pass.
+        #   3. ``endpoint_in_scope:<scheme>://<host>:<port>`` —
+        #      hostname-only or full-endpoint allow-list membership
+        #      (existing behaviour).
+        #   4. ``method_allowed:<method>`` — operator-approved
+        #      method (existing behaviour).
+        from modus.scope import host_matches_denied_pattern
+
         scheme = "https" if action.tls else "http"
         port_part = f":{action.port}" if action.port is not None else ""
         endpoint_label = f"endpoint_in_scope:{scheme}://{action.target}{port_part}"
@@ -302,7 +342,10 @@ def _preconditions(action: Action, state: CorpusState) -> list[_Precondition]:
             if state.allowed_endpoints
             else action.target in state.in_scope_assets
         )
+        denied_token_matches = host_matches_denied_pattern(action.target, state.denied_patterns)
         return [
+            ("recon_mode_allows_request", not state.recon_mode),
+            (f"host_not_denied:{action.target}", not denied_token_matches),
             (endpoint_label, endpoint_ok),
             (f"method_allowed:{action.method}", action.method in state.allowed_methods),
         ]

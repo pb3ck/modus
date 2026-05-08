@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 #: Tier produced by the partition. ``A`` is probe-eligible, ``B`` is
 #: skip-this-engagement-but-not-permanently-banned (corporate /
@@ -303,11 +303,44 @@ def render_review(result: PartitionResult, source: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def default_tier_c_denied_patterns() -> tuple[Any, ...]:
+    """Return the maintained Tier C tokens as :class:`DeniedPattern`s.
+
+    For ADR 0005 ``ScopePolicy.denied_patterns`` defence-in-depth:
+    operators import this and pass to their scope policy to inherit
+    the maintained Tier C deny set (`.gov.`, combatant commands,
+    USAF/USMC/USCG/USSF segment-bounded markers, PIV/CAC prefixes,
+    Pentagon, DARPA, ITAR). Engagement learnings (every slip caught
+    at engagement-time) flow into both surfaces — the partition CLI
+    output AND the consistency-layer floor — without the operator
+    having to copy the list by hand.
+
+    The return type is intentionally erased to ``tuple[Any, ...]`` to
+    avoid a circular import; the elements are
+    :class:`modus.scope.DeniedPattern` instances. Use this as:
+
+    .. code-block:: python
+
+        from modus.partition import default_tier_c_denied_patterns
+        from modus.scope import ScopePolicy
+
+        scope = ScopePolicy(
+            target_name="anduril",
+            allowed_assets=frozenset({...}),
+            denied_patterns=default_tier_c_denied_patterns(),
+        )
+    """
+    from modus.scope import DeniedPattern
+
+    return tuple(DeniedPattern(token=m.token, mode=m.mode) for m in _MARKERS if m.tier == "C")
+
+
 __all__ = [
     "HostClassification",
     "PartitionResult",
     "Tier",
     "classify_host",
+    "default_tier_c_denied_patterns",
     "partition_hosts",
     "render_review",
 ]

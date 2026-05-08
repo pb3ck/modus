@@ -418,6 +418,99 @@ class TestPartitionCli:
         assert result.exit_code != 0
 
 
+class TestDefaultTierCDeniedPatterns:
+    """ADR 0005 helper: surface the maintained Tier C tokens as
+    :class:`DeniedPattern` instances so ScopePolicy.denied_patterns
+    can inherit the partition tool's deny set automatically."""
+
+    def test_returns_denied_pattern_instances(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+        from modus.scope import DeniedPattern
+
+        result = default_tier_c_denied_patterns()
+        assert len(result) > 0
+        for p in result:
+            assert isinstance(p, DeniedPattern)
+
+    def test_includes_combatant_commands(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+
+        tokens = {p.token for p in default_tier_c_denied_patterns()}
+        # Sample of the maintained list — the set may grow but
+        # these must always be present.
+        for required in ("africom", "socom", "usaf", "usmc"):
+            assert required in tokens, f"missing required Tier C token: {required}"
+
+    def test_includes_piv_prefix(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+
+        result = default_tier_c_denied_patterns()
+        piv_pattern = next((p for p in result if p.token == "piv."), None)
+        assert piv_pattern is not None
+        assert piv_pattern.mode == "prefix"
+
+    def test_includes_gov_infix(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+
+        result = default_tier_c_denied_patterns()
+        gov = next((p for p in result if p.token == ".gov."), None)
+        assert gov is not None
+        assert gov.mode == "infix"
+
+    def test_includes_itar_substring(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+
+        result = default_tier_c_denied_patterns()
+        itar = next((p for p in result if p.token == "itar"), None)
+        assert itar is not None
+        assert itar.mode == "substring"
+
+    def test_does_not_include_tier_b_or_ambiguous_tokens(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+
+        tokens = {p.token for p in default_tier_c_denied_patterns()}
+        # Tier B markers — must NOT be in the deny set.
+        for b_marker in ("infosec", "internal", "azuregov", "corp"):
+            assert b_marker not in tokens, f"Tier B marker {b_marker!r} leaked into the deny set"
+        # Ambiguous markers — must NOT be in the deny set.
+        for ambig in ("lonestar", "bogey", "afn"):
+            assert ambig not in tokens, f"ambiguous marker {ambig!r} leaked into the deny set"
+
+    def test_matches_known_tier_c_hosts(self) -> None:
+        # End-to-end: feed the helper into host_matches_denied_pattern
+        # and verify it correctly denies known Tier C hosts.
+        from modus.partition import default_tier_c_denied_patterns
+        from modus.scope import host_matches_denied_pattern
+
+        patterns = default_tier_c_denied_patterns()
+        for hostname in (
+            "africom.anduril.com",
+            "testsocom.anduril.com",
+            "piv.usmc.anduril.com",
+            "desert-guardian-itar.anduril.com",
+            "access-metrics.gov.africom.anduril.dev",
+        ):
+            matches = host_matches_denied_pattern(hostname, patterns)
+            assert matches, f"default deny set failed to match {hostname}"
+
+    def test_does_not_match_benign_hosts(self) -> None:
+        from modus.partition import default_tier_c_denied_patterns
+        from modus.scope import host_matches_denied_pattern
+
+        patterns = default_tier_c_denied_patterns()
+        for hostname in (
+            "armory.anduril.com",
+            "foxglove.bunker.anduril.dev",
+            "dev-okta.developer.anduril.com",
+            "usafrica.example.com",  # the segment-mode anti-slip
+            "addons.example.com",  # would false-match an `ad` substring
+        ):
+            matches = host_matches_denied_pattern(hostname, patterns)
+            assert not matches, (
+                f"default deny set falsely matched benign host {hostname}: {matches}"
+            )
+
+
 class TestHostClassificationDataclass:
     """Sanity on the dataclass shape and immutability."""
 

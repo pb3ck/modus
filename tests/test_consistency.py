@@ -460,6 +460,232 @@ def _accept_all(args: dict[str, object], scope: object, state: object) -> list[t
     return []
 
 
+class TestRequestReconMode:
+    """ADR 0005: Request action gates on recon_mode unconditionally.
+
+    When ``recon_mode=True``, the consistency layer rejects every
+    Request — even hosts that ARE in ``allowed_assets`` and use
+    allowed methods. The intent: phase-1 recon-mode session does
+    passive enumeration only; live HTTP probing waits for the
+    operator's scope-expansion commit.
+    """
+
+    def test_recon_mode_rejects_in_scope_request(self) -> None:
+        state = CorpusState(
+            in_scope_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            recon_mode=True,
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="target.example.com", method="GET", path="/"),
+            state,
+        )
+        assert not verdict.accepted
+        assert "recon_mode_allows_request" in verdict.failed_preconditions
+
+    def test_recon_mode_false_passes_in_scope_request(self) -> None:
+        verdict = ConsistencyChecker().check(
+            Request(target="target.example.com", method="GET", path="/"),
+            _scoped_state(),
+        )
+        assert verdict.accepted, verdict.rationale
+
+
+class TestRequestDeniedPatterns:
+    """ADR 0005: Request action gates on denied_patterns even when in scope.
+
+    Defence-in-depth: the deny check applies on top of the existing
+    allow-list check. A host that matches any denied pattern is
+    rejected even when it's in ``allowed_assets`` — operator commit
+    decisions can be wrong; the maintained deny set is the floor.
+    """
+
+    def test_segment_match_rejects_in_scope_host(self) -> None:
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"piv.usmc.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token="usmc", mode="segment"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="piv.usmc.example.com", method="GET", path="/"),
+            state,
+        )
+        assert not verdict.accepted
+        assert "host_not_denied:piv.usmc.example.com" in verdict.failed_preconditions
+
+    def test_prefix_match_rejects(self) -> None:
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"piv.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token="piv.", mode="prefix"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="piv.example.com", method="GET", path="/"),
+            state,
+        )
+        assert not verdict.accepted
+        assert "host_not_denied:piv.example.com" in verdict.failed_preconditions
+
+    def test_substring_match_rejects(self) -> None:
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"africom.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token="africom", mode="substring"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="africom.example.com", method="GET", path="/"),
+            state,
+        )
+        assert not verdict.accepted
+
+    def test_infix_match_rejects(self) -> None:
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"foo.gov.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token=".gov.", mode="infix"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="foo.gov.example.com", method="GET", path="/"),
+            state,
+        )
+        assert not verdict.accepted
+
+    def test_no_denied_patterns_means_no_deny(self) -> None:
+        # Sanity: empty denied_patterns doesn't reject.
+        verdict = ConsistencyChecker().check(
+            Request(target="target.example.com", method="GET", path="/"),
+            _scoped_state(),
+        )
+        assert verdict.accepted
+
+    def test_non_matching_pattern_does_not_reject(self) -> None:
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token="usmc", mode="segment"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="target.example.com", method="GET", path="/"),
+            state,
+        )
+        assert verdict.accepted
+
+    def test_segment_does_not_match_inside_word(self) -> None:
+        # ``usaf`` segment-bounded should NOT match ``usafrica``
+        # (the slip-class the partition tool's segment mode prevents).
+        from modus.scope import DeniedPattern
+
+        state = CorpusState(
+            in_scope_assets=frozenset({"usafrica.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            denied_patterns=(DeniedPattern(token="usaf", mode="segment"),),
+        )
+        verdict = ConsistencyChecker().check(
+            Request(target="usafrica.example.com", method="GET", path="/"),
+            state,
+        )
+        assert verdict.accepted, verdict.rationale
+
+
+class TestToolReconModeSideEffect:
+    """ADR 0005: Tool actions gate on side_effect tier in recon mode.
+
+    Recon mode allows ``read``-tier tools (subfinder, crt.sh fetch,
+    Quarry-passthrough reads) and rejects ``write`` and ``active``
+    tiers. Outside recon mode, all tiers pass (existing behaviour).
+    """
+
+    def _setup(
+        self,
+        *,
+        side_effect: str = "active",
+    ) -> ConsistencyChecker:
+        from modus.scope import ScopePolicy
+        from modus.tools import ShellInvocation, ToolRegistry, ToolSpec
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        registry = ToolRegistry()
+        spec = ToolSpec(
+            name="example.tool",
+            kind="shell",
+            description="example",
+            args_schema={"type": "object"},
+            side_effect=side_effect,  # type: ignore[arg-type]
+            invocation=ShellInvocation(argv_template=("echo",)),
+            preconditions=_accept_all,
+        )
+        registry.register(spec)
+        return ConsistencyChecker(scope=scope, registry=registry)
+
+    def test_recon_mode_rejects_active_tool(self) -> None:
+        from modus.actions import Tool
+
+        checker = self._setup(side_effect="active")
+        state = CorpusState(
+            in_scope_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            recon_mode=True,
+        )
+        verdict = checker.check(Tool(name="example.tool", args={}), state)
+        assert not verdict.accepted
+        assert any(
+            name.startswith("recon_mode_tool_side_effect:example.tool:active")
+            for name in verdict.failed_preconditions
+        )
+
+    def test_recon_mode_rejects_write_tool(self) -> None:
+        from modus.actions import Tool
+
+        checker = self._setup(side_effect="write")
+        state = CorpusState(
+            in_scope_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            recon_mode=True,
+        )
+        verdict = checker.check(Tool(name="example.tool", args={}), state)
+        assert not verdict.accepted
+        assert any(
+            name.startswith("recon_mode_tool_side_effect:example.tool:write")
+            for name in verdict.failed_preconditions
+        )
+
+    def test_recon_mode_allows_read_tool(self) -> None:
+        from modus.actions import Tool
+
+        checker = self._setup(side_effect="read")
+        state = CorpusState(
+            in_scope_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+            recon_mode=True,
+        )
+        verdict = checker.check(Tool(name="example.tool", args={}), state)
+        assert verdict.accepted, verdict.rationale
+
+    def test_recon_mode_false_allows_active_tool(self) -> None:
+        # Sanity: outside recon mode, active tools work as before.
+        from modus.actions import Tool
+
+        checker = self._setup(side_effect="active")
+        verdict = checker.check(
+            Tool(name="example.tool", args={}),
+            _scoped_state(),  # default recon_mode=False
+        )
+        assert verdict.accepted, verdict.rationale
+
+
 class TestPruneBatch:
     def test_prune_returns_one_verdict_per_action(self) -> None:
         actions = [

@@ -195,6 +195,231 @@ class TestScopeDefaultHeaders:
         assert policy.default_headers["X-Engagement-ID"] == "anduril-2026-05-08"
 
 
+class TestScopeWildcards:
+    """ADR 0005: scope_wildcards is the program-published wildcard
+    authorization (e.g. ``*.anduril.com``). Used as the substrate
+    for recon-mode enumeration. NOT a probe-mode allow-list —
+    Request still requires exact-match allowed_assets.
+    """
+
+    def test_default_empty(self) -> None:
+        policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
+        assert policy.scope_wildcards == frozenset()
+
+    def test_valid_wildcard_round_trips(self) -> None:
+        policy = ScopePolicy(
+            target_name="anduril",
+            allowed_assets=frozenset(),
+            scope_wildcards=frozenset({"*.anduril.com", "*.anduril.dev"}),
+        )
+        assert "*.anduril.com" in policy.scope_wildcards
+
+    def test_rejects_pattern_without_leading_star_dot(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset(),
+                scope_wildcards=frozenset({"anduril.com"}),  # missing *.
+            )
+
+    def test_rejects_embedded_wildcard(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset(),
+                scope_wildcards=frozenset({"*.foo.*.com"}),
+            )
+
+    def test_rejects_empty_label_in_parent_zone(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset(),
+                scope_wildcards=frozenset({"*..com"}),
+            )
+
+    def test_rejects_label_starting_with_hyphen(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset(),
+                scope_wildcards=frozenset({"*.-foo.com"}),
+            )
+
+    def test_rejects_invalid_character_in_label(self) -> None:
+        with pytest.raises(ValidationError):
+            ScopePolicy(
+                target_name="t",
+                allowed_assets=frozenset(),
+                scope_wildcards=frozenset({"*.foo bar.com"}),  # space invalid
+            )
+
+
+class TestReconMode:
+    """ADR 0005: recon_mode flag toggles read-only OSINT behaviour."""
+
+    def test_default_false(self) -> None:
+        policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
+        assert policy.recon_mode is False
+
+    def test_round_trip_true(self) -> None:
+        policy = ScopePolicy(
+            target_name="anduril",
+            allowed_assets=frozenset(),
+            scope_wildcards=frozenset({"*.anduril.com"}),
+            recon_mode=True,
+        )
+        assert policy.recon_mode is True
+
+
+class TestDeniedPatterns:
+    """ADR 0005: denied_patterns is a defence-in-depth deny set."""
+
+    def test_default_empty(self) -> None:
+        policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"a.example.com"}))
+        assert policy.denied_patterns == ()
+
+    def test_substring_pattern_round_trips(self) -> None:
+        from modus.scope import DeniedPattern
+
+        policy = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"a.example.com"}),
+            denied_patterns=(DeniedPattern(token="africom", mode="substring"),),
+        )
+        assert policy.denied_patterns[0].token == "africom"
+        assert policy.denied_patterns[0].mode == "substring"
+
+    def test_segment_pattern_round_trips(self) -> None:
+        from modus.scope import DeniedPattern
+
+        p = DeniedPattern(token="usmc", mode="segment")
+        assert p.mode == "segment"
+
+    def test_prefix_pattern_round_trips(self) -> None:
+        from modus.scope import DeniedPattern
+
+        p = DeniedPattern(token="piv.", mode="prefix")
+        assert p.mode == "prefix"
+
+    def test_infix_pattern_round_trips(self) -> None:
+        from modus.scope import DeniedPattern
+
+        p = DeniedPattern(token=".gov.", mode="infix")
+        assert p.mode == "infix"
+
+    def test_default_mode_is_substring(self) -> None:
+        from modus.scope import DeniedPattern
+
+        p = DeniedPattern(token="africom")
+        assert p.mode == "substring"
+
+    def test_rejects_unknown_mode(self) -> None:
+        from modus.scope import DeniedPattern
+
+        with pytest.raises(ValidationError):
+            DeniedPattern(token="africom", mode="not-a-real-mode")  # type: ignore[arg-type]
+
+    def test_rejects_empty_token(self) -> None:
+        from modus.scope import DeniedPattern
+
+        with pytest.raises(ValidationError):
+            DeniedPattern(token="", mode="substring")
+
+    def test_denied_pattern_is_frozen(self) -> None:
+        from modus.scope import DeniedPattern
+
+        p = DeniedPattern(token="x", mode="substring")
+        with pytest.raises(ValidationError):
+            p.token = "y"  # type: ignore[misc]
+
+
+class TestHostMatchesDeniedPattern:
+    """The matcher used by the consistency layer's Request precondition."""
+
+    def test_substring_match(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="africom", mode="substring"),)
+        result = host_matches_denied_pattern("africom.example.com", patterns)
+        assert result == ("africom",)
+
+    def test_substring_does_not_match(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="africom", mode="substring"),)
+        result = host_matches_denied_pattern("example.com", patterns)
+        assert result == ()
+
+    def test_segment_match_with_dot_boundary(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="usmc", mode="segment"),)
+        result = host_matches_denied_pattern("piv.usmc.example.com", patterns)
+        assert result == ("usmc",)
+
+    def test_segment_match_with_hyphen_boundary(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="ad", mode="segment"),)
+        result = host_matches_denied_pattern("ad-dev.example.com", patterns)
+        assert result == ("ad",)
+
+    def test_segment_does_not_match_inside_word(self) -> None:
+        # ``usaf`` segment-bounded must NOT match ``usafrica``
+        # (regression on the partition slip class).
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="usaf", mode="segment"),)
+        result = host_matches_denied_pattern("usafrica.example.com", patterns)
+        assert result == ()
+
+    def test_prefix_match(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="piv.", mode="prefix"),)
+        result = host_matches_denied_pattern("piv.foo.example.com", patterns)
+        assert result == ("piv.",)
+
+    def test_prefix_does_not_match_in_middle(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="piv.", mode="prefix"),)
+        result = host_matches_denied_pattern("foo.piv.example.com", patterns)
+        assert result == ()
+
+    def test_infix_match(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token=".gov.", mode="infix"),)
+        result = host_matches_denied_pattern("foo.gov.example.com", patterns)
+        assert result == (".gov.",)
+
+    def test_returns_all_matched_tokens(self) -> None:
+        # A host can match multiple patterns; the matcher returns all.
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (
+            DeniedPattern(token="usmc", mode="segment"),
+            DeniedPattern(token="piv.", mode="prefix"),
+        )
+        result = host_matches_denied_pattern("piv.usmc.example.com", patterns)
+        assert "usmc" in result
+        assert "piv." in result
+
+    def test_case_insensitive(self) -> None:
+        from modus.scope import DeniedPattern, host_matches_denied_pattern
+
+        patterns = (DeniedPattern(token="AFRICOM", mode="substring"),)
+        result = host_matches_denied_pattern("africom.example.com", patterns)
+        assert result == ("AFRICOM",)
+
+    def test_empty_patterns_returns_empty(self) -> None:
+        from modus.scope import host_matches_denied_pattern
+
+        assert host_matches_denied_pattern("any.example.com", ()) == ()
+
+
 class TestAllowedEndpointParsing:
     def test_bare_hostname_is_wildcard(self) -> None:
         policy = ScopePolicy(target_name="t", allowed_assets=frozenset({"example.com"}))

@@ -16,10 +16,21 @@ constraining the scheme and port). The full URL form is the
 operator's tool for tightening scope down to specific endpoints —
 useful when a host happens to run multiple services on different
 ports and only one of them is in scope.
+
+ADR 0005 introduces three additional scope axes for agent-driven
+recon: :attr:`scope_wildcards` (the program's published wildcard
+authorization, used as the substrate for recon-mode enumeration),
+:attr:`recon_mode` (a flag that gates ``Request`` actions off and
+restricts ``Tool`` actions to the ``read`` side-effect tier), and
+:attr:`denied_patterns` (a deny-by-pattern set that re-checks every
+probed host as defence-in-depth even when the host is in
+``allowed_assets``). All three default to empty / False — operators
+who don't need recon-mode get the v0.4 behaviour unchanged.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -220,6 +231,91 @@ ToolDeclaration = Annotated[
 ]
 
 
+class DeniedPattern(BaseModel):
+    """One pattern that denies a hostname when matched (ADR 0005).
+
+    Same matching modes as the partition tool's internal markers; see
+    :mod:`modus.partition` for the canonical token list. Operators
+    typically populate :attr:`ScopePolicy.denied_patterns` from
+    :func:`modus.partition.default_tier_c_denied_patterns` for the
+    maintained DO-NOT-TOUCH set, plus engagement-specific additions.
+
+    Modes:
+
+    * ``substring`` — appears anywhere in the lowercased hostname.
+      Suitable for tokens long enough that incidental matches are
+      vanishingly rare (combatant commands, ITAR).
+    * ``segment`` — must be bounded by a label separator
+      (``.``, ``-``, ``_``) or string start/end. Suitable for short
+      tokens (``usaf``, ``usmc``) that would otherwise match
+      incidentally inside longer words.
+    * ``prefix`` — matches when the hostname starts with the token.
+      Suitable for credential-gated deployment prefixes (``piv.``).
+    * ``infix`` — literal substring; semantically identical to
+      ``substring`` but documents intent (``.gov.``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    token: str = Field(min_length=1, max_length=128)
+    mode: Literal["substring", "segment", "prefix", "infix"] = "substring"
+
+
+def _validate_wildcard_pattern(spec: str) -> str:
+    """Parse a ``*.example.com``-shape wildcard, returning the parent zone.
+
+    Exactly one leading ``*.`` label is allowed; embedded wildcards
+    (e.g. ``*.foo.*.com``) are rejected. Each subsequent label is
+    LDH-validated (letters, digits, hyphens; no leading/trailing
+    hyphen). The wildcard form is for ``ScopePolicy.scope_wildcards``
+    in recon mode (per ADR 0005), not for ``allowed_assets`` — that
+    field stays exact-match per the structural firewall property.
+    """
+    if not spec or not spec.strip():
+        raise ValueError("empty wildcard pattern")
+    if not spec.startswith("*."):
+        raise ValueError(f"wildcard must start with '*.': {spec!r}")
+    parent = spec[2:]
+    if not parent:
+        raise ValueError(f"empty parent zone in wildcard: {spec!r}")
+    if "*" in parent or "?" in parent:
+        raise ValueError(
+            f"only one leading wildcard label allowed; embedded wildcards rejected: {spec!r}"
+        )
+    for label in parent.split("."):
+        if not label:
+            raise ValueError(f"empty label in wildcard parent zone: {spec!r}")
+        if label.startswith("-") or label.endswith("-"):
+            raise ValueError(f"label may not start or end with '-': {label!r} in {spec!r}")
+        for ch in label:
+            if not (ch.isalnum() or ch == "-"):
+                raise ValueError(f"invalid character {ch!r} in wildcard label {label!r} ({spec!r})")
+    return parent
+
+
+def host_matches_denied_pattern(host: str, patterns: tuple[DeniedPattern, ...]) -> tuple[str, ...]:
+    """Return the tokens of patterns that match ``host`` (empty if none).
+
+    Used by the consistency layer's Request precondition (per ADR
+    0005) to deny probes against hosts matching any
+    :attr:`ScopePolicy.denied_patterns` entry. Returning the matched
+    tokens (rather than just a boolean) lets the rejection rationale
+    name what triggered the denial — useful when an operator is
+    debugging "why isn't this host in scope?".
+    """
+    h = host.lower()
+    matched: list[str] = []
+    for p in patterns:
+        t = p.token.lower()
+        if (
+            (p.mode in ("substring", "infix") and t in h)
+            or (p.mode == "prefix" and h.startswith(t))
+            or (p.mode == "segment" and re.search(rf"(?:^|[.\-_]){re.escape(t)}(?:[.\-_]|$)", h))
+        ):
+            matched.append(p.token)
+    return tuple(matched)
+
+
 class ScopePolicy(BaseModel):
     """Operator-authored scope envelope for a single Modus session.
 
@@ -266,6 +362,33 @@ class ScopePolicy(BaseModel):
     Per-request action headers override these by name. The
     User-Agent is set separately via :attr:`user_agent` and should
     not be duplicated here."""
+    scope_wildcards: frozenset[str] = Field(default_factory=frozenset)
+    """ADR 0005: program-published wildcard scope (e.g.
+    ``*.anduril.com``). Used by recon-mode autonomous sessions as
+    the substrate for passive enumeration and as the candidate set
+    for ``corpus.propose_scope_expansion``. NOT a probe-mode
+    allow-list — ``Request`` actions still require an exact-match
+    ``allowed_assets`` entry. Multiple entries supported (programs
+    that publish several wildcards).
+    """
+    recon_mode: bool = False
+    """ADR 0005: when True, the consistency layer rejects ``Request``
+    actions unconditionally and gates ``Tool`` actions to the
+    ``read`` side-effect tier. Recon-mode autonomous sessions can do
+    passive OSINT (subfinder, crt.sh, dnsdumpster) but cannot
+    generate live HTTP traffic to wildcard-matched hosts. The
+    intended workflow: phase 1 recon-mode session enumerates and
+    proposes a Tier A/B/C expansion; operator commits;
+    ``recon_mode`` flips to False for the probe-mode session."""
+    denied_patterns: tuple[DeniedPattern, ...] = ()
+    """ADR 0005: deny-by-pattern set, applied as defence-in-depth
+    even when a host is in :attr:`allowed_assets`. Operators
+    typically populate from
+    :func:`modus.partition.default_tier_c_denied_patterns` for the
+    maintained DO-NOT-TOUCH set (``.gov.``, combatant commands,
+    USAF/USMC/USCG/USSF, PIV/CAC prefixes), plus engagement-specific
+    additions. Two filters (allow-list + deny-pattern) — both must
+    pass for a probe to fire."""
     tools: tuple[ToolDeclaration, ...] = ()
     """Operator-declared tools to register on top of Modus's
     builtin set. Each entry is a shell or MCP-passthrough
@@ -291,6 +414,13 @@ class ScopePolicy(BaseModel):
         unknown = value - known
         if unknown:
             raise ValueError(f"unknown HTTP method(s) in scope: {sorted(unknown)}")
+        return value
+
+    @field_validator("scope_wildcards")
+    @classmethod
+    def _validate_scope_wildcards(cls, value: frozenset[str]) -> frozenset[str]:
+        for spec in value:
+            _validate_wildcard_pattern(spec)
         return value
 
     @field_validator("default_headers")
@@ -354,8 +484,10 @@ class ScopePolicy(BaseModel):
 __all__ = [
     "DEFAULT_USER_AGENT",
     "AllowedEndpoint",
+    "DeniedPattern",
     "McpToolDeclaration",
     "ScopePolicy",
     "ShellToolDeclaration",
     "ToolDeclaration",
+    "host_matches_denied_pattern",
 ]
