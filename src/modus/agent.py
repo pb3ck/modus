@@ -134,6 +134,7 @@ class AgentLoop:
         objective: str | None = None,
         record: SessionRecord | None = None,
         initial_observation_ids: frozenset[str] = frozenset(),
+        seed_from_corpus: bool = True,
     ) -> SessionRecord:
         """Run the loop end-to-end and return the session record.
 
@@ -164,6 +165,18 @@ class AgentLoop:
         the agent cite the recon data the operator did up front.
         Empty by default (the agent reasons only over what it
         observes itself this run).
+
+        ``seed_from_corpus`` (default ``True``) auto-loads
+        responses-shape evidence for ``target_name`` from Quarry
+        via the ``list_response_artifacts`` MCP read tool and
+        materialises each artifact into a SessionObservation
+        before the main loop starts. Operator-friendly default —
+        if the operator already ingested recon into Quarry, the
+        agent uses it without any explicit args. Older Quarry
+        versions that don't expose ``list_response_artifacts``
+        surface as a soft warning logged at INFO; the loop
+        proceeds with whatever pool the caller provided. Set to
+        ``False`` to opt out (cold-start runs, regression tests).
         """
         if record is None:
             record = SessionRecord(
@@ -172,6 +185,14 @@ class AgentLoop:
                 started_at=_utcnow(),
             )
         objective_text = objective or self._default_objective(target_name, bug_classes)
+        # Auto-load from Quarry corpus, if enabled. Materialised
+        # observations get added to ``session.observations`` and
+        # their ids fold into ``initial_observation_ids`` so the
+        # run pool starts with both the explicit caller-provided
+        # ids and the corpus-sourced ones.
+        if seed_from_corpus:
+            corpus_seeded = await self._seed_from_corpus(target_name)
+            initial_observation_ids = frozenset(initial_observation_ids | corpus_seeded)
         empty_streak = 0
         wall_started = time.monotonic()
         # Cumulative one-line summaries of executed actions and their
@@ -403,6 +424,82 @@ class AgentLoop:
     # fallback-emitted), the fallback stays quiet for this many
     # steps. Keeps the loop from spamming the same fallback over
     # and over once the loop is productively closing.
+
+    async def _seed_from_corpus(self, target_name: str) -> frozenset[str]:
+        """Auto-load responses-shape evidence from Quarry into the run pool.
+
+        Calls Quarry's ``list_response_artifacts`` MCP read tool for
+        ``target_name``, materialises each artifact into a
+        :class:`SessionObservation` appended to ``session.observations``,
+        and returns the set of observation ids the caller folds into
+        ``initial_observation_ids``.
+
+        Failure modes are non-fatal — the autonomous loop should still
+        run if the corpus seeding doesn't work:
+
+        * ``CorpusToolsMissingError`` (older Quarry) → logged at INFO,
+          empty set returned. Operator gets a friendly upgrade hint
+          via the warning.
+        * ``CorpusToolError`` (target doesn't exist or other tool-
+          surface error) → logged at WARNING, empty set returned.
+        * ``CorpusUnavailableError`` (Quarry binary missing or stuck) →
+          logged at WARNING, empty set returned. The loop's existing
+          per-step ``with_quarry`` calls will surface the same error
+          through their handlers, so the operator sees the failure
+          without us having to re-raise here.
+        """
+        from modus.corpus import CorpusError
+        from modus.session import SessionObservation
+
+        try:
+            async with self.session.with_quarry() as quarry:
+                artifacts = await quarry.list_response_artifacts(target=target_name)
+        except CorpusError as exc:
+            _LOG.info(
+                "seed_from_corpus skipped for target=%r: %s "
+                "(autonomous run will rely on caller-provided "
+                "initial_observation_ids and step-by-step observations)",
+                target_name,
+                exc,
+            )
+            return frozenset()
+        except Exception as exc:  # broad: don't kill the run on unexpected errors
+            _LOG.warning(
+                "seed_from_corpus unexpectedly failed for target=%r: %s",
+                target_name,
+                exc,
+            )
+            return frozenset()
+
+        seeded: set[str] = set()
+        for art in artifacts:
+            payload: dict[str, Any] = {
+                "id": art.observation_id,
+                "observation_id": art.observation_id,
+                "url": art.url,
+                "method": "GET",
+                "status": art.status,
+                "request_headers": {},
+                "request_body": None,
+                "response_headers": dict(art.response_headers),
+                "response_body": art.response_body,
+                "elapsed_ms": 0.0,
+                "error": None,
+                "redirect_chain": [],
+                "ingested_at": art.ingested_at,
+                "sha256": art.sha256,
+            }
+            self.session.observations.append(
+                SessionObservation(id=art.observation_id, kind="request", payload=payload)
+            )
+            seeded.add(art.observation_id)
+        if seeded:
+            _LOG.info(
+                "seed_from_corpus loaded %d responses-shape observations for target=%r",
+                len(seeded),
+                target_name,
+            )
+        return frozenset(seeded)
 
     def _fallback_proposals(
         self,

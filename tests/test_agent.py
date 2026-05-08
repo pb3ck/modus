@@ -370,6 +370,157 @@ class TestFallbackProposer:
         hyp = next(a for a in executor.calls if a.kind == "hypothesize")
         assert seed_id in hyp.evidence_refs
 
+    async def test_seed_from_corpus_loads_response_artifacts(self) -> None:
+        """When ``seed_from_corpus=True`` (the default), the loop
+        calls ``list_response_artifacts`` on session.with_quarry()
+        and materialises each result into a SessionObservation
+        whose id lands in the run pool."""
+        from contextlib import asynccontextmanager
+
+        from modus.corpus import ResponseArtifact, StubCorpusClient
+        from modus.session import ServerSession
+
+        class _SeedingStub(StubCorpusClient):
+            """Stub that returns one ResponseArtifact for any target."""
+
+            async def list_response_artifacts(self, *, target, limit=None, max_body_bytes=None):
+                return [
+                    ResponseArtifact(
+                        observation_id="seed-obs-1",
+                        url=f"http://target.example.com/{target}",
+                        status=200,
+                        response_headers={"content-type": "application/json"},
+                        response_body='{"version":"1.0.0"}',
+                        body_truncated=False,
+                        body_full_len=20,
+                        ingested_at="2026-05-08T00:00:00Z",
+                        sha256="abc123",
+                    )
+                ]
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+
+        @asynccontextmanager
+        async def _yield_stub():  # type: ignore[no-untyped-def]
+            yield _SeedingStub()
+
+        session.with_quarry = _yield_stub  # type: ignore[method-assign]
+
+        proposer = FixedProposer([Probe(target="target.example.com")])
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=1, max_consecutive_empty_steps=1),
+        )
+        await loop.run(target_name="demo", bug_classes=["info_disclosure"])
+
+        # The seeded observation landed in session.observations.
+        seeded = [o for o in session.observations if o.id == "seed-obs-1"]
+        assert len(seeded) == 1
+        assert seeded[0].payload["url"] == "http://target.example.com/demo"
+        assert seeded[0].payload["status"] == 200
+
+    async def test_seed_from_corpus_can_be_disabled(self) -> None:
+        """``seed_from_corpus=False`` skips the auto-load entirely."""
+        from contextlib import asynccontextmanager
+
+        from modus.corpus import ResponseArtifact, StubCorpusClient
+        from modus.session import ServerSession
+
+        called = {"n": 0}
+
+        class _CountingStub(StubCorpusClient):
+            async def list_response_artifacts(self, *, target, limit=None, max_body_bytes=None):
+                called["n"] += 1
+                return [
+                    ResponseArtifact(
+                        observation_id="should-not-appear",
+                        url="http://x/",
+                        status=200,
+                        response_headers={},
+                        response_body="",
+                        body_truncated=False,
+                        body_full_len=0,
+                        ingested_at="2026-05-08T00:00:00Z",
+                        sha256="0",
+                    )
+                ]
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+
+        @asynccontextmanager
+        async def _yield_stub():  # type: ignore[no-untyped-def]
+            yield _CountingStub()
+
+        session.with_quarry = _yield_stub  # type: ignore[method-assign]
+
+        proposer = FixedProposer([Probe(target="target.example.com")])
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=1, max_consecutive_empty_steps=1),
+        )
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            seed_from_corpus=False,
+        )
+        assert called["n"] == 0
+        assert not [o for o in session.observations if o.id == "should-not-appear"]
+
+    async def test_seed_from_corpus_swallows_corpus_errors(self) -> None:
+        """When Quarry can't be reached (older version, missing
+        binary, etc.), the auto-load is non-fatal — the loop runs
+        with whatever pool the caller provided."""
+        from contextlib import asynccontextmanager
+
+        from modus.corpus import CorpusUnavailableError
+        from modus.session import ServerSession
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+
+        @asynccontextmanager
+        async def _raising_quarry():  # type: ignore[no-untyped-def]
+            raise CorpusUnavailableError("quarry binary not found")
+            yield  # unreachable, but keeps the contextmanager protocol happy
+
+        session.with_quarry = _raising_quarry  # type: ignore[method-assign]
+
+        proposer = FixedProposer([Probe(target="target.example.com")])
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=1, max_consecutive_empty_steps=1),
+        )
+        # The loop should run without raising — the unavailable
+        # corpus is logged and the run proceeds with an empty pool.
+        record = await loop.run(target_name="demo", bug_classes=["info_disclosure"])
+        assert len(record.steps) == 1
+
     async def test_fallback_stays_quiet_during_warmup(self) -> None:
         # Before FALLBACK_AFTER_STEP, the fallback shouldn't fire
         # even with matching observations in the pool — gives the

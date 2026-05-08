@@ -188,6 +188,26 @@ def _autonomous_session_input_schema() -> dict[str, Any]:
                     "max_wall_seconds": {"type": "number", "minimum": 1},
                 },
             },
+            "seed_from_corpus": {
+                "type": "boolean",
+                "description": (
+                    "When `true` (the default), the autonomous loop "
+                    "auto-loads responses-shape evidence for the "
+                    "target from Quarry via the "
+                    "`list_response_artifacts` MCP read tool, and "
+                    "uses it to seed the run's evidence pool. The "
+                    "operator-friendly path: if you ingested recon "
+                    "into Quarry as a `responses` source, the "
+                    "agent uses it without any explicit args. "
+                    "Older Quarry versions that don't expose "
+                    "`list_response_artifacts` skip the auto-load "
+                    "(soft-warned via INFO log) and proceed with "
+                    "whatever pool the caller provided. Set to "
+                    "`false` for cold-start runs, regression tests, "
+                    "or if you explicitly want only the "
+                    "`recon_jsonl_path` records."
+                ),
+            },
             "recon_jsonl_path": {
                 "type": "string",
                 "description": (
@@ -847,6 +867,7 @@ class ModusServer:
         recon_warning: str | None = None
         if isinstance(recon_path, str) and recon_path.strip():
             seeded_ids, recon_warning = _seed_observations_from_jsonl(self.session, recon_path)
+        seed_from_corpus = bool(arguments.get("seed_from_corpus", True))
         loop = AgentLoop(
             proposer=proposer,
             checker=self.checker,
@@ -859,6 +880,7 @@ class ModusServer:
             bug_classes=bug_classes,
             objective=objective,
             initial_observation_ids=seeded_ids,
+            seed_from_corpus=seed_from_corpus,
         )
         result: dict[str, Any] = {
             "session": record.to_payload(),
@@ -872,6 +894,7 @@ class ModusServer:
                 for c in self.session.candidates
             ],
             "seeded_observation_count": len(seeded_ids),
+            "seed_from_corpus": seed_from_corpus,
         }
         if recon_warning is not None:
             result["recon_warning"] = recon_warning
@@ -906,6 +929,7 @@ class ModusServer:
         recon_warning: str | None = None
         if isinstance(recon_path, str) and recon_path.strip():
             seeded_ids, recon_warning = _seed_observations_from_jsonl(self.session, recon_path)
+        seed_from_corpus = bool(arguments.get("seed_from_corpus", True))
 
         started_at = datetime.now(UTC)
         record = SessionRecord(
@@ -929,6 +953,7 @@ class ModusServer:
                 objective=objective,
                 record=record,
                 initial_observation_ids=seeded_ids,
+                seed_from_corpus=seed_from_corpus,
             )
         )
 
@@ -950,6 +975,7 @@ class ModusServer:
             "bug_classes": list(bug_classes),
             "status": "running",
             "seeded_observation_count": len(seeded_ids),
+            "seed_from_corpus": seed_from_corpus,
         }
         if recon_warning is not None:
             result["recon_warning"] = recon_warning

@@ -32,6 +32,7 @@ from modus.corpus import (
     CorpusToolsMissingError,
     Finding,
     QuarryMcpClient,
+    ResponseArtifact,
     StubCorpusClient,
 )
 
@@ -464,6 +465,122 @@ class TestCreateCandidate:
             await client.create_candidate(
                 target="alpha", module="agent_hypothesize", key="k", rationale="r"
             )
+
+
+class TestListResponseArtifacts:
+    @staticmethod
+    def _payload(
+        *,
+        target_id: str = "tgt-1",
+        target_name: str = "alpha",
+        artifacts: list[dict[str, Any]] | None = None,
+        total: int | None = None,
+        truncated: bool = False,
+    ) -> dict[str, Any]:
+        arts = artifacts if artifacts is not None else []
+        return {
+            "target_id": target_id,
+            "target_name": target_name,
+            "artifacts": arts,
+            "total": total if total is not None else len(arts),
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _artifact(
+        *,
+        observation_id: str = "art-1",
+        url: str = "http://target/a",
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        body: str = '{"version":"1.0.0"}',
+        body_truncated: bool = False,
+        body_full_len: int | None = None,
+        ingested_at: str = "2026-05-08T00:00:00Z",
+        sha256: str = "abc123",
+    ) -> dict[str, Any]:
+        return {
+            "observation_id": observation_id,
+            "url": url,
+            "status": status,
+            "response_headers": headers or {"Content-Type": "application/json"},
+            "response_body": body,
+            "body_truncated": body_truncated,
+            "body_full_len": body_full_len if body_full_len is not None else len(body),
+            "ingested_at": ingested_at,
+            "sha256": sha256,
+        }
+
+    async def test_returns_list_of_response_artifacts(self) -> None:
+        payload = self._payload(
+            artifacts=[
+                self._artifact(observation_id="a", url="http://t/1", body="b1"),
+                self._artifact(observation_id="b", url="http://t/2", body="b2"),
+            ]
+        )
+        session = _FakeSession(responses={"list_response_artifacts": _text_result(payload)})
+        client = QuarryMcpClient.from_session(session)
+        result = await client.list_response_artifacts(target="alpha")
+        assert len(result) == 2
+        assert all(isinstance(r, ResponseArtifact) for r in result)
+        assert result[0].observation_id == "a"
+        assert result[0].url == "http://t/1"
+        assert result[0].response_body == "b1"
+
+    async def test_passes_optional_args_through(self) -> None:
+        session = _FakeSession(responses={"list_response_artifacts": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.list_response_artifacts(target="alpha", limit=25, max_body_bytes=1024)
+        assert session.calls == [
+            (
+                "list_response_artifacts",
+                {"target": "alpha", "limit": 25, "max_body_bytes": 1024},
+            ),
+        ]
+
+    async def test_omits_optional_args_when_unset(self) -> None:
+        session = _FakeSession(responses={"list_response_artifacts": _text_result(self._payload())})
+        client = QuarryMcpClient.from_session(session)
+        await client.list_response_artifacts(target="alpha")
+        args = session.calls[0][1]
+        assert "limit" not in args
+        assert "max_body_bytes" not in args
+
+    async def test_empty_artifacts_returns_empty_list(self) -> None:
+        session = _FakeSession(
+            responses={"list_response_artifacts": _text_result(self._payload(artifacts=[]))}
+        )
+        client = QuarryMcpClient.from_session(session)
+        result = await client.list_response_artifacts(target="alpha")
+        assert result == []
+
+    async def test_malformed_artifact_row_raises_schema_error(self) -> None:
+        broken = self._payload(artifacts=[{"observation_id": "a"}])  # missing url, status
+        session = _FakeSession(responses={"list_response_artifacts": _text_result(broken)})
+        client = QuarryMcpClient.from_session(session)
+        with pytest.raises(CorpusSchemaError):
+            await client.list_response_artifacts(target="alpha")
+
+    async def test_records_truncation_flags(self) -> None:
+        payload = self._payload(
+            artifacts=[
+                self._artifact(body="X" * 100, body_truncated=True, body_full_len=10000),
+            ]
+        )
+        session = _FakeSession(responses={"list_response_artifacts": _text_result(payload)})
+        client = QuarryMcpClient.from_session(session)
+        result = await client.list_response_artifacts(target="alpha")
+        assert result[0].body_truncated is True
+        assert result[0].body_full_len == 10000
+
+    async def test_missing_optional_tool_raises_per_call(self) -> None:
+        # Quarry without ``list_response_artifacts`` (older version).
+        partial = [_FakeTool(name=name) for name in QuarryMcpClient.REQUIRED_TOOLS]
+        session = _FakeSession(tools=partial)
+        client = QuarryMcpClient.from_session(session)
+        client._available_tools = frozenset(t.name for t in partial)
+        with pytest.raises(CorpusToolsMissingError):
+            await client.list_response_artifacts(target="alpha")
 
 
 class TestPromoteFinding:
