@@ -893,7 +893,9 @@ class ModusServer:
                 }
                 for c in self.session.candidates
             ],
+            "findings_promoted": _extract_promoted_findings(record),
             "seeded_observation_count": len(seeded_ids),
+            "corpus_seeded_observation_count": record.corpus_seeded_observation_count,
             "seed_from_corpus": seed_from_corpus,
         }
         if recon_warning is not None:
@@ -1269,6 +1271,36 @@ async def serve(scope_path: Path) -> int:
                 with suppress(asyncio.CancelledError, Exception):
                     await warmup_task
     return 0
+
+
+def _extract_promoted_findings(record: Any) -> list[dict[str, Any]]:
+    """Pull the Findings auto-promoted during this run out of the
+    audit record.
+
+    Scans every step's ``execution_results`` for ``corpus.promote_finding``
+    Tool observations and returns their ``builtin_result`` payloads —
+    the {finding_id, candidate_id, severity, title, status, ...}
+    shape Quarry's ``finding_promote`` write tool returns. Empty
+    list when no promotions fired.
+
+    Lives alongside the ``candidates`` field in the autonomous-
+    session result payload so an MCP-host operator can see what
+    Findings landed without round-tripping through Quarry.
+    """
+    out: list[dict[str, Any]] = []
+    for step in record.steps:
+        for executed, result in zip(step.executed, step.execution_results, strict=False):
+            if getattr(executed, "kind", None) != "tool":
+                continue
+            if getattr(executed, "name", None) != "corpus.promote_finding":
+                continue
+            if not isinstance(result, dict):
+                continue
+            br = result.get("builtin_result")
+            if not isinstance(br, dict) or "finding_id" not in br:
+                continue
+            out.append(dict(br))
+    return out
 
 
 def _hypothesize_dedup_key(action: Hypothesize) -> str:

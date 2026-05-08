@@ -68,13 +68,18 @@ omit the field — read-only. Add `POST`, `PUT`, `PATCH`, or
 `DELETE` only when you specifically want the agent to send write
 traffic.
 
-Validate the file:
+Quick smoke test that your environment is wired correctly
+(this runs a sample consistency check — it doesn't read your
+scope file, just confirms the action validator works):
 
 ```sh
 uv run modus action validate <(echo '{"state": {"in_scope_assets": ["localhost"], "allowed_methods": ["GET"]}, "actions": [{"kind": "probe", "target": "localhost"}]}')
 ```
 
-If it returns `accept`, your environment is wired correctly.
+If the table prints `accept` for the probe action, the install
+is good. The actual scope-file enforcement happens at MCP server
+startup — `modus mcp --scope ~/modus-scope.json` parses the JSON
+and refuses to start on a malformed file. Step 3 covers that.
 
 ## 3. Configure your MCP host
 
@@ -117,8 +122,16 @@ If your Quarry runs in a container (Exegol, Docker), add:
 
 Restart the host application (fully quit and reopen, not just
 close-window). Modus's tools should appear in the host's tool
-surface — eighteen of them, prefixed with the server name you
-chose (e.g. `modus.run_autonomous_session`).
+surface — 22 of them, prefixed with the server name you chose
+(e.g. `modus.run_autonomous_session`). They cover three
+classes: 7 verified-action tools (`probe`, `request`, `compare`,
+`differential`, `annotate`, `hypothesize`, `tool`), 10
+Quarry-passthrough read/analytical tools (`corpus_status`,
+`list_targets`, `search`, `list_assets`, `diff`, `coverage`,
+`recall`, `analyze_*`), and 5 autonomous-session tools
+(`run_autonomous_session`, `start_autonomous_session`,
+`poll_autonomous_session`, `cancel_autonomous_session`,
+`propose_actions`).
 
 ## 4. Run an autonomous session
 
@@ -160,11 +173,18 @@ asyncio.run(main())
 ```
 
 Then ingest it into Quarry so the corpus has assets / evidence /
-artifacts to reason over:
+artifacts to reason over. If you haven't already created the
+target in Quarry, do that first:
 
 ```sh
+quarry target add juice-shop --kind lab
 quarry ingest --target juice-shop --source responses /tmp/recon.jsonl
 ```
+
+`--kind lab` for local lab targets like Juice Shop;
+`--kind bug-bounty` for real engagements;
+`--kind private` for internal/red-team scopes. The kind tags
+the target metadata; Modus doesn't condition behaviour on it.
 
 `quarry status` should now show non-zero `assets`, `runs`,
 `artifacts`, `evidence`. (Real engagements would use `httpx`,
@@ -195,17 +215,23 @@ proposal, every Z3 verdict, every executed action, any
 Candidates the agent authored, and any Findings the loop
 auto-promoted.
 
-The result reports `seed_from_corpus` (whether auto-load was
-enabled) and `seeded_observation_count` (how many JSONL records
-the optional `recon_jsonl_path` argument materialized — separate
-from the corpus auto-load). If you ingested into Quarry and
-want a cold-start run anyway, pass `seed_from_corpus=false`. If
-you want to layer an additional JSONL on top of the corpus
-auto-load (e.g. recon you didn't ingest), pass
-`recon_jsonl_path` — both sources combine, deduped by
-observation id. If the JSONL path was wrong or
-unreadable the result includes a `recon_warning` explaining why
-no observations were seeded.
+The result reports two seeding counts:
+
+- `corpus_seeded_observation_count` — observations Modus
+  auto-loaded from Quarry's corpus via `list_response_artifacts`.
+  Zero if `seed_from_corpus=false`, if Quarry is unreachable, or
+  if the corpus has no responses-shape evidence for the target.
+- `seeded_observation_count` — observations Modus loaded from
+  the optional `recon_jsonl_path` argument. Zero if you didn't
+  pass that argument.
+
+If you ingested into Quarry and want a cold-start run anyway,
+pass `seed_from_corpus=false`. If you want to layer an additional
+JSONL on top of the corpus auto-load (e.g. recon you didn't
+ingest), pass `recon_jsonl_path` — both sources combine, deduped
+by observation id. If the JSONL path was wrong or unreadable
+the result includes a `recon_warning` explaining why no
+observations were seeded from it.
 
 Expect the session to take 5–20 minutes for a 25-step budget,
 mostly LLM round-trip latency. The host's UX during the call is
@@ -216,18 +242,23 @@ timeout).
 
 ## 5. Read the result and review the Findings
 
-The MCP tool result is a JSON payload with three top-level fields:
+The MCP tool result is a JSON payload with these top-level fields:
 
 - `session` — the full audit record (every step, every proposal,
   every verdict, every executed action).
 - `candidates` — the Candidates the agent authored via
   `hypothesize` actions.
-- `findings` — the Findings the agent auto-promoted from those
-  Candidates. The autonomous loop calls `corpus.promote_finding`
-  on the step after a `hypothesize` whose `severity_hint` was
-  `medium`, `high`, or `critical`. Severity-`low` and severity-
-  `info` Candidates stay un-promoted in the corpus for your
-  review.
+- `findings_promoted` — the Findings the agent auto-promoted
+  from those Candidates this run, with the
+  `{finding_id, candidate_id, severity, title, status, ...}`
+  shape Quarry's `finding_promote` returns. The autonomous
+  loop calls `corpus.promote_finding` on the step after a
+  `hypothesize` whose `severity_hint` was `medium`, `high`, or
+  `critical`. Severity-`low` and severity-`info` Candidates
+  stay un-promoted in the corpus for your review.
+- `seed_from_corpus`, `corpus_seeded_observation_count`,
+  `seeded_observation_count`, `recon_warning` — the seeding
+  diagnostics covered in §4b.
 
 Each promoted Finding lands in Quarry with status `hypothesis`.
 The Finding lifecycle (`hypothesis` → `confirmed` → `reported` →

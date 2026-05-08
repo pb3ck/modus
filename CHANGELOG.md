@@ -10,6 +10,51 @@ notice.
 
 ## [Unreleased]
 
+### Added
+
+- **`findings_promoted` in autonomous-session result payload.**
+  Each `run_autonomous_session` / `start_autonomous_session`
+  result now includes a `findings_promoted` field — a list of
+  the Findings the autonomous loop auto-promoted this run, in
+  Quarry's `finding_promote` shape (`{finding_id, candidate_id,
+  severity, title, status, ...}`). Operators reading the result
+  in their MCP host's transcript see the Findings landed without
+  having to round-trip through Quarry's CLI. Surfaces what was
+  previously only visible by inspecting `record.steps` or
+  querying `quarry finding list`.
+- **`corpus_seeded_observation_count` in the result payload
+  AND on `SessionRecord.to_payload()`.** Distinguishes the two
+  seeding paths: `corpus_seeded_observation_count` counts
+  observations Modus auto-loaded from Quarry's corpus via
+  `list_response_artifacts`; `seeded_observation_count` continues
+  to count observations from the optional `recon_jsonl_path`
+  JSONL. Operators can tell at a glance whether the corpus
+  auto-load picked up anything.
+- **`SessionRecord.corpus_seeded_observation_count`** field —
+  populated by `AgentLoop.run` when `seed_from_corpus=True`.
+  The audit record now carries the auto-load count alongside
+  the existing step / executed counters.
+
+### Changed
+
+- **`docs/quickstart.md` corrected** for several stale claims a
+  doc-following dry-run surfaced:
+  - §3 tool count was "eighteen"; actual is 22 (7 verified-action
+    + 10 Quarry passthrough + 5 autonomous-session). Replaced
+    the bare number with the breakdown.
+  - §4 missing `quarry target add <name>` step before
+    `quarry ingest` — added.
+  - §5 referenced a `findings` field in the result payload that
+    didn't exist; result actually carried `candidates` only.
+    Now `findings_promoted` exists (see Added) and §5 documents
+    the real payload shape.
+  - §4b documented `seeded_observation_count` in a way that
+    conflated JSONL-loaded and corpus-loaded counts; rewritten
+    to distinguish the two.
+  - §2 "Validate the file" wording was misleading — the
+    command tested the action validator, not the operator's
+    scope file. Reworded as a smoke test of install correctness.
+
 ## [0.4.0a2] — 2026-05-08
 
 Operator-UX bridge alpha. Closes the gap between the v0.4.0a1

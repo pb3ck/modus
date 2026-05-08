@@ -85,6 +85,14 @@ class SessionRecord:
     steps: list[StepRecord] = field(default_factory=list)
     finished_at: datetime | None = None
     termination_reason: str | None = None
+    corpus_seeded_observation_count: int = 0
+    """Number of observations the loop materialised from Quarry's
+    corpus at run start (via ``list_response_artifacts``). Distinct
+    from the operator-supplied ``initial_observation_ids`` count
+    and the ``recon_jsonl_path`` count — this counts only the
+    auto-load path. Zero when ``seed_from_corpus=False``, when
+    Quarry is unreachable, or when the corpus has no
+    responses-shape evidence for the target."""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialise to JSON-friendly dict for an MCP tool result."""
@@ -96,6 +104,7 @@ class SessionRecord:
             "termination_reason": self.termination_reason,
             "step_count": len(self.steps),
             "executed_count": sum(len(s.executed) for s in self.steps),
+            "corpus_seeded_observation_count": self.corpus_seeded_observation_count,
             "steps": [
                 {
                     "step_index": s.step_index,
@@ -192,6 +201,7 @@ class AgentLoop:
         # ids and the corpus-sourced ones.
         if seed_from_corpus:
             corpus_seeded = await self._seed_from_corpus(target_name)
+            record.corpus_seeded_observation_count = len(corpus_seeded)
             initial_observation_ids = frozenset(initial_observation_ids | corpus_seeded)
         empty_streak = 0
         wall_started = time.monotonic()
