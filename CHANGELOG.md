@@ -10,6 +10,52 @@ notice.
 
 ## [Unreleased]
 
+## [0.4.0a1] — 2026-05-08
+
+Autonomous Candidate→Finding alpha. The autonomous loop now
+closes the full hypothesize → Quarry-persisted Candidate →
+Finding lifecycle inside a single `run_autonomous_session`
+call, severity-gated per the v0.4.0 promotion policy. The
+external-submission firewall (no `submit`/`publish`/`post`/
+`report` tool in the registry, adding one is off-limits) is
+preserved.
+
+Live-verified end-to-end on OWASP Juice Shop with phi4:14b on
+local Ollama, against a corpus seeded with 38 recon evidence
+chunks: 22 steps, 5 Candidates landed, 4 auto-promoted to
+Findings (high / high / medium / high), 1 severity=info
+Candidate correctly stayed un-promoted per the threshold rule.
+The deterministic fallback proposer fired exactly once at step
+5 to unblock the LLM's commitment gap; phi4 emitted four more
+hypothesizes and three promotions on its own afterward.
+
+What 0.4.0a1 ships with that 0.3.0a1 didn't:
+
+- **`corpus.promote_finding` builtin** in the default tool
+  registry (9 default builtins, was 8 in 0.3.0a1). Backed by
+  Quarry's MCP `finding_promote` write tool.
+- **Agent-authored Candidates persist to Quarry** via the new
+  `candidate_create` MCP write tool (Quarry-side, see Quarry
+  CHANGELOG). The `hypothesize` action handler funnels into
+  `db.upsert_candidate` so the resulting row is byte-identical
+  to what `analyze_*` would have produced for the same inputs.
+  Module name `agent_hypothesize`; dedup key
+  `<bug_class>:<sorted_evidence_refs>`; score derived
+  monotonically from `severity_hint`.
+- **Severity-gated auto-promotion**: medium/high/critical
+  Candidates auto-promote inside the run; low/info stay
+  un-promoted for operator review.
+- **Pattern-driven fallback proposer** that closes the
+  decisiveness gap mid-size open-weight models hit on the
+  autonomous loop. Per-bug-class detectors
+  (info_disclosure / auth_bypass / idor / sqli) match against
+  the run's observations and synthesize `Hypothesize` plus
+  `corpus.promote_finding` proposals when the LLM keeps
+  abdicating. Frontier models reach the lifecycle on their
+  own — the fallback only fires for local models.
+- **`AgentLoop.run(initial_observation_ids=...)`** parameter
+  to seed the run pool from operator recon.
+
 ### Added
 
 - **Pattern-driven fallback proposer** (`modus.evidence_patterns.detect_evidence_patterns`
