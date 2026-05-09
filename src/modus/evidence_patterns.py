@@ -494,6 +494,87 @@ _USER_ARRAY_WRAPPER_MARKERS: tuple[str, ...] = (
     '"results":[{',
 )
 
+# ---- static-artifact detector helpers (added 2026-05-09 from wp-lab v4) ----
+
+# Path matches ``/wp-content/plugins/<slug>/readme.txt`` (any case for
+# the segment names); slug captured for fingerprint-into-rationale use.
+_PLUGIN_README_PATH_RE = re.compile(
+    r"/wp-content/plugins/[^/]+/readme\.txt$",
+    re.IGNORECASE,
+)
+_PLUGIN_SLUG_FROM_PATH_RE = re.compile(
+    r"/wp-content/plugins/([^/]+)/readme\.txt$",
+    re.IGNORECASE,
+)
+# WordPress plugin readme.txt convention surfaces the published version
+# on a ``Stable tag:`` line. Capture the version string.
+_STABLE_TAG_RE = re.compile(r"(?im)^Stable tag:\s*([\w.\-]+)\s*$")
+
+# VCS metadata path: ``/.git/<file>``, ``/.svn/<file>``, ``/.hg/<file>``
+# with at least one path segment under the dot-dir. Excludes bare
+# ``/.git`` (no segment) which webserver listings sometimes 200 by
+# accident on auto-redirect.
+_VCS_PATH_RE = re.compile(r"/\.(?:git|svn|hg)/[\w.\-]+", re.IGNORECASE)
+
+# Body looks like an actual VCS metadata file (config/HEAD/entries),
+# not a 200 fallthrough. Tightly scoped — exact tokens these files emit.
+_VCS_BODY_RE = re.compile(
+    r"(?im)"
+    r"(\[core\]|\[remote\b|^ref:\s+refs/|repositoryformatversion\s*=|"
+    r"^entries\s*$|<wc-entries|hgrc)"
+)
+
+# Backup-file path. Trailing-extension variants like ``.bak``, ``.old``,
+# ``~``, ``.swp`` AND well-known config files like ``.env`` regardless
+# of extension.
+_BACKUP_FILE_PATH_RE = re.compile(
+    r"(?:\.(?:bak|old|orig|backup|save|swp|swo|tmp)$|~$|/\.env(?:\.[\w]+)?$)",
+    re.IGNORECASE,
+)
+
+
+_DOTENV_LINE_RE = re.compile(r"(?m)^[A-Z][A-Z0-9_]*\s*=")
+
+
+def _looks_like_text_config(body: str) -> bool:
+    """Conservative gate for "this looks like a config file response."
+
+    Avoids firing on generic 404-fallthrough HTML (a webserver that
+    returns 200 + an HTML error page for missing static files would
+    otherwise false-positive every backup-path probe). The check is
+    intentionally narrow: non-empty, not HTML, and either explicit
+    config-keyword markers OR multiple ``KEY=value`` lines (env-file
+    shape).
+    """
+    if not body or len(body) < 8:
+        return False
+    head_raw = body[:1024]
+    head_l = head_raw.lstrip().lower()
+    # Reject HTML error pages — the most common false-positive shape.
+    if head_l.startswith("<!doctype") or head_l.startswith("<html") or head_l.startswith("<?xml"):
+        return False
+    # Explicit config-keyword markers (PHP, INI, well-known env vars).
+    config_markers = (
+        "<?php",
+        "define(",
+        "db_name",
+        "db_password",
+        "auth_key",
+        "[core]",
+        "[mysql]",
+        "[server]",
+        "database_url=",
+        "secret_key=",
+        "api_key=",
+        "aws_",
+        "export ",
+    )
+    if any(marker in head_l for marker in config_markers):
+        return True
+    # Env-file shape: at least 2 lines of ``UPPER_SNAKE=...``. Single
+    # match is too lax (an HTML doc could have ``LANG=en`` somewhere).
+    return len(_DOTENV_LINE_RE.findall(head_raw)) >= 2
+
 
 def _looks_like_user_array(body: str) -> bool:
     """Stricter shape check for the ``user_object_dump`` detector.
@@ -859,6 +940,120 @@ def _detect_info_disclosure(
                     detector="info_disclosure:user_object_dump",
                 )
             )
+            continue
+        # ---- static-artifact detectors ----
+        # The 2026-05-09 wp-lab v4 baseline showed scout would *probe*
+        # high-signal misconfig paths but no detector recognized the
+        # 200-with-textual-content shape, so the agent layer never
+        # promoted them. These three detectors close that gap by
+        # firing on path+content shape rather than just body content.
+        path = _path_only(url)
+        # 1. Plugin version disclosure — ``/wp-content/plugins/<slug>/
+        #    readme.txt`` returning 200 with a ``Stable tag:`` line.
+        #    Modus's hypothesizer can correlate this with a CVE database
+        #    in a follow-up step; the candidate here just signals
+        #    "version X.Y.Z fingerprinted on this host."
+        if _PLUGIN_README_PATH_RE.search(path) and "stable tag:" in body.lower():
+            slug_match = _PLUGIN_SLUG_FROM_PATH_RE.search(path)
+            stable = _STABLE_TAG_RE.search(body)
+            slug = slug_match.group(1) if slug_match else "?"
+            version = stable.group(1).strip() if stable else "?"
+            out.append(
+                FallbackHypothesis(
+                    bug_class="info_disclosure",
+                    severity_hint="info",
+                    evidence_refs=(obs.id,),
+                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                        bug_class="info_disclosure",
+                        endpoint=path,
+                        curl_target=url,
+                        obs_id=obs.id,
+                        status=200,
+                        evidence_excerpt=(
+                            f"WordPress plugin {slug!r} fingerprinted at "
+                            f"version {version!r} via /readme.txt — "
+                            f"compare against a CVE database for known "
+                            f"vulnerabilities affecting this version"
+                        ),
+                        impact_note=(
+                            "version disclosure on its own is informational, "
+                            "but pivots a hypothesizer toward exploit "
+                            "selection if any CVE matches the version range"
+                        ),
+                    ),
+                    detector="info_disclosure:plugin_version_disclosure",
+                )
+            )
+            continue
+        # 2. VCS directory exposure — ``/.git/<file>``, ``/.svn/<file>``,
+        #    ``/.hg/<file>`` returning 200 with their characteristic
+        #    text shape. The body content gates the match: a 200 on
+        #    ``/.git/config`` from a webserver that returns 200 to
+        #    everything would otherwise false-positive.
+        if _VCS_PATH_RE.search(path) and _VCS_BODY_RE.search(body):
+            out.append(
+                FallbackHypothesis(
+                    bug_class="info_disclosure",
+                    severity_hint="medium",
+                    evidence_refs=(obs.id,),
+                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                        bug_class="info_disclosure",
+                        endpoint=path,
+                        curl_target=url,
+                        obs_id=obs.id,
+                        status=200,
+                        evidence_excerpt=(
+                            f"VCS metadata file readable in webroot "
+                            f"({_excerpt(body, 120)!r}) — a clone or "
+                            f"directory traversal can recover internal "
+                            f"source, branch history, and commit metadata"
+                        ),
+                        impact_note=(
+                            "an unauthenticated attacker can reconstruct "
+                            "internal source code and infrastructure secrets "
+                            "committed to history"
+                        ),
+                    ),
+                    detector="info_disclosure:vcs_directory_exposure",
+                )
+            )
+            continue
+        # 3. Config-backup exposure — ``*.bak``/``*.old``/``*~``/
+        #    ``*.swp``/``.env`` paths returning 200 with text body.
+        #    Distinct from the secret-content detector above: this fires
+        #    even when the body lacks a recognised secret shape (e.g.
+        #    a ``wp-config.php.bak`` whose secrets are unique to the
+        #    target). The body-shape gate (text-y, non-empty, no HTML
+        #    error markers) keeps generic 404-fallthrough HTML out.
+        if _BACKUP_FILE_PATH_RE.search(path) and _looks_like_text_config(body):
+            out.append(
+                FallbackHypothesis(
+                    bug_class="info_disclosure",
+                    severity_hint="high",
+                    evidence_refs=(obs.id,),
+                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                        bug_class="info_disclosure",
+                        endpoint=path,
+                        curl_target=url,
+                        obs_id=obs.id,
+                        status=200,
+                        evidence_excerpt=(
+                            f"config-backup file readable in webroot "
+                            f"({_excerpt(body, 120)!r}) — typically "
+                            f"contains DB credentials, auth keys/salts, "
+                            f"or embedded API tokens"
+                        ),
+                        impact_note=(
+                            "config backups commonly expose DB credentials "
+                            "and authentication material that grants admin "
+                            "access; severity is high pending content review "
+                            "(critical if real secrets are present)"
+                        ),
+                    ),
+                    detector="info_disclosure:config_backup_exposure",
+                )
+            )
+            continue
     return out
 
 

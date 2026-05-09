@@ -763,11 +763,14 @@ class ReconAugmentedProposer:
     if the operator wants pure LLM-driven recon (e.g. ablation tests).
     """
 
-    # Per-step caps. 4 each → at most 8 prepended scout proposals,
-    # which leaves at least 8 ``sample_count`` LLM slots before
-    # consistency pruning. The cap is what keeps the LLM in the game.
-    DEFAULT_MISCONFIG_PER_STEP: int = 4
-    DEFAULT_PLUGIN_PER_STEP: int = 4
+    # Per-step caps. 1 each → at most 2 prepended scout proposals on
+    # scout-led steps. The 2026-05-09 wp-lab v4 baseline showed why
+    # higher caps are bad: with cap=4+4 and unconditional prepend,
+    # scout dominated 22 of 25 steps, the LLM never emitted a
+    # candidate, recall fell to 6.7%. 1+1 + interleaved scheduling
+    # (see ``propose``) keeps scout to ~50% of the budget.
+    DEFAULT_MISCONFIG_PER_STEP: int = 1
+    DEFAULT_PLUGIN_PER_STEP: int = 1
 
     def __init__(
         self,
@@ -790,14 +793,27 @@ class ReconAugmentedProposer:
 
     async def propose(self, context: StepContext) -> list[Action]:
         proposals = await self._inner.propose(context)
+
+        # Alternate scout-led and LLM-led steps. The 2026-05-09 wp-lab
+        # v4 baseline showed unconditional scout prepend crushes LLM
+        # creativity: scout's curated list always has an unprobed path
+        # to lead with, so it wins the "first novel survivor" race
+        # every single step. Even-parity (history_len even) is LLM-led
+        # — no scout prepended, the LLM batch flows through unchanged.
+        # Odd-parity is scout-led — 1 misconfig + 1 plugin prepended in
+        # priority order. Net over a 40-step budget: ~20 LLM-led +
+        # ~20 scout-led actions; scout drains its top-20 priority
+        # paths and LLM owns the long-tail novelty exploration.
+        history_len = len(context.recent_history)
+        if history_len % 2 == 0:
+            return list(proposals)
+
         misconfig = build_misconfig_proposals(
             self._scope, context.recent_history, limit=self._misconfig_per_step
         )
         plugin = build_wp_plugin_proposals(
             self._scope, context.recent_history, limit=self._plugin_per_step
         )
-        # Prepend: scout's top-K candidates win the "first novel
-        # survivor" race, draining the curated list across steps.
         return [*misconfig, *plugin, *proposals]
 
 

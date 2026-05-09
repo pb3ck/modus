@@ -442,6 +442,172 @@ class TestDetectEvidencePatterns:
         result = detect_evidence_patterns([obs], ("info_disclosure",))
         assert result == []
 
+    # ---- static-artifact detectors (added 2026-05-09 from wp-lab v4) ----
+
+    def test_info_disclosure_vcs_directory_exposure(self) -> None:
+        # ``/.git/config`` returning 200 with characteristic git config
+        # markup. The 2026-05-09 wp-lab v3 run probed this path and
+        # got a 200 but no detector matched → the bug never promoted.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "[core]\n"
+            "\trepositoryformatversion = 0\n"
+            "\tfilemode = true\n"
+            '[remote "origin"]\n'
+            "\turl = git@github.com:acme/marketing-site.git\n"
+        )
+        obs = self._obs("obs-git", "http://target/.git/config", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:vcs_directory_exposure"]
+        assert len(matched) == 1
+        assert matched[0].severity_hint == "medium"
+        assert matched[0].evidence_refs == ("obs-git",)
+
+    def test_info_disclosure_vcs_directory_skips_html_404_fallthrough(
+        self,
+    ) -> None:
+        # Some webservers return 200 + an HTML error page for missing
+        # files. The body-shape gate must reject those.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = "<!DOCTYPE html><html><head><title>Not found</title></head>"
+        obs = self._obs("obs-404", "http://target/.git/config", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:vcs_directory_exposure"]
+        assert matched == []
+
+    def test_info_disclosure_vcs_head_ref(self) -> None:
+        # ``/.git/HEAD`` content is a single ``ref: refs/heads/main`` line.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-head",
+            "http://target/.git/HEAD",
+            200,
+            body="ref: refs/heads/main\n",
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:vcs_directory_exposure"]
+        assert len(matched) == 1
+
+    def test_info_disclosure_config_backup_exposure(self) -> None:
+        # ``/wp-config.php.bak`` returning 200 with PHP source. The
+        # secret-content detector might fire on real-looking secrets,
+        # but plenty of backups don't contain shape-recognised secrets.
+        # This detector fires on path-shape + body-shape regardless.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "<?php\n"
+            "// Acme prod wp-config — accidentally backed up\n"
+            "define( 'DB_NAME', 'wp_acme' );\n"
+            "define( 'DB_USER', 'wp' );\n"
+            "define( 'DB_PASSWORD', 'this_is_unique_to_target_redacted' );\n"
+            "define( 'AUTH_KEY', 'unique-target-specific-string-here' );\n"
+        )
+        obs = self._obs(
+            "obs-bak",
+            "http://target/wp-config.php.bak",
+            200,
+            body=body,
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:config_backup_exposure"]
+        assert len(matched) == 1
+        assert matched[0].severity_hint == "high"
+
+    def test_info_disclosure_config_backup_skips_404_fallthrough_html(
+        self,
+    ) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = "<!DOCTYPE html><html><body>Not found</body></html>"
+        obs = self._obs(
+            "obs-bak-404",
+            "http://target/wp-config.php.bak",
+            200,
+            body=body,
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:config_backup_exposure"]
+        assert matched == []
+
+    def test_info_disclosure_dotenv_exposure_is_caught(self) -> None:
+        # Env files with values that don't match the secret-content
+        # detector (operator-specific values) should still fire as
+        # config_backup_exposure on the path+shape gate.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = "DEBUG=true\nLOG_LEVEL=info\nPORT=3000\nNODE_ENV=production\n"
+        obs = self._obs("obs-env", "http://target/.env", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:config_backup_exposure"]
+        assert len(matched) == 1
+
+    def test_info_disclosure_dotenv_with_secrets_fires_secret_detector(self) -> None:
+        # When the .env content has shape-recognised secrets, the
+        # higher-quality secret-content detector takes precedence
+        # over the path-based config_backup_exposure detector. This
+        # keeps the per-observation candidate count to one.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+        )
+        obs = self._obs("obs-env-aws", "http://target/.env", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        # Exactly one candidate per observation; shape-recognised
+        # secret takes priority over the path-based fallback.
+        assert len(result) == 1
+        assert result[0].detector.startswith("info_disclosure:")
+        # Detector tag carries the specific secret pattern that fired.
+        assert "config_backup_exposure" not in result[0].detector
+
+    def test_info_disclosure_plugin_version_disclosure(self) -> None:
+        # ``/wp-content/plugins/<slug>/readme.txt`` with ``Stable tag:``.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "=== Contact Form 7 ===\n"
+            "Contributors: takayukister\n"
+            "Tags: contact, form\n"
+            "Stable tag: 5.3.1\n"
+            "\n"
+            "Just another contact form plugin.\n"
+        )
+        obs = self._obs(
+            "obs-cf7",
+            "http://target/wp-content/plugins/contact-form-7/readme.txt",
+            200,
+            body=body,
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:plugin_version_disclosure"]
+        assert len(matched) == 1
+        assert matched[0].severity_hint == "info"
+        # Rationale carries the slug + version for the LLM hypothesizer
+        # to pivot toward CVE selection.
+        assert "contact-form-7" in matched[0].rationale
+        assert "5.3.1" in matched[0].rationale
+
+    def test_info_disclosure_plugin_version_only_fires_on_readme_txt(
+        self,
+    ) -> None:
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        # Non-readme path with the same body shape — must not fire.
+        obs = self._obs(
+            "obs-other",
+            "http://target/wp-content/plugins/some-plugin/changelog.txt",
+            200,
+            body="Stable tag: 1.0.0\n",
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:plugin_version_disclosure"]
+        assert matched == []
+
     def test_info_disclosure_skips_test_fixture_value(self) -> None:
         from modus.evidence_patterns import detect_evidence_patterns
 
