@@ -566,20 +566,23 @@ class TestDetectEvidencePatterns:
         assert "config_backup_exposure" not in result[0].detector
 
     def test_info_disclosure_plugin_version_disclosure(self) -> None:
-        # ``/wp-content/plugins/<slug>/readme.txt`` with ``Stable tag:``.
+        # ``/wp-content/plugins/<slug>/readme.txt`` with ``Stable tag:``,
+        # for a slug NOT in the curated CVE registry — emits the bare
+        # version-disclosure candidate. (Slugs in the registry escalate
+        # to ``plugin_cve_match`` instead — covered separately below.)
         from modus.evidence_patterns import detect_evidence_patterns
 
         body = (
-            "=== Contact Form 7 ===\n"
-            "Contributors: takayukister\n"
-            "Tags: contact, form\n"
-            "Stable tag: 5.3.1\n"
+            "=== Some Custom Plugin ===\n"
+            "Contributors: someone\n"
+            "Tags: utility\n"
+            "Stable tag: 2.4.0\n"
             "\n"
-            "Just another contact form plugin.\n"
+            "A utility plugin.\n"
         )
         obs = self._obs(
-            "obs-cf7",
-            "http://target/wp-content/plugins/contact-form-7/readme.txt",
+            "obs-custom",
+            "http://target/wp-content/plugins/some-custom-plugin/readme.txt",
             200,
             body=body,
         )
@@ -589,15 +592,17 @@ class TestDetectEvidencePatterns:
         assert matched[0].severity_hint == "info"
         # Rationale carries the slug + version for the LLM hypothesizer
         # to pivot toward CVE selection.
-        assert "contact-form-7" in matched[0].rationale
-        assert "5.3.1" in matched[0].rationale
+        assert "some-custom-plugin" in matched[0].rationale
+        assert "2.4.0" in matched[0].rationale
 
     def test_info_disclosure_plugin_version_only_fires_on_readme_txt(
         self,
     ) -> None:
         from modus.evidence_patterns import detect_evidence_patterns
 
-        # Non-readme path with the same body shape — must not fire.
+        # Non-readme path with the same body shape — must not fire on
+        # any plugin detector (neither the bare version nor the
+        # CVE-match path).
         obs = self._obs(
             "obs-other",
             "http://target/wp-content/plugins/some-plugin/changelog.txt",
@@ -605,8 +610,149 @@ class TestDetectEvidencePatterns:
             body="Stable tag: 1.0.0\n",
         )
         result = detect_evidence_patterns([obs], ("info_disclosure",))
-        matched = [r for r in result if r.detector == "info_disclosure:plugin_version_disclosure"]
+        matched = [
+            r for r in result if "plugin_version" in r.detector or "plugin_cve" in r.detector
+        ]
         assert matched == []
+
+    def test_info_disclosure_plugin_cve_match_escalates_severity(self) -> None:
+        # When the registry has a CVE entry covering the fingerprinted
+        # ``(slug, version)``, the detector escalates the candidate's
+        # bug_class + severity to the upstream CVE's values. This is
+        # the issue #32 fix — ``elementor 3.6.2`` is an
+        # ``auth_bypass / critical`` bug per CVE-2022-1329, not the
+        # bare ``info_disclosure / info`` the version-only detector
+        # would emit.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "=== Elementor ===\n"
+            "Contributors: elemntor\n"
+            "Tags: page builder, drag and drop\n"
+            "Stable tag: 3.6.2\n"
+            "\n"
+            "Drag-and-drop page builder for WordPress.\n"
+        )
+        obs = self._obs(
+            "obs-elementor",
+            "http://target/wp-content/plugins/elementor/readme.txt",
+            200,
+            body=body,
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector.startswith("info_disclosure:plugin_cve_match")]
+        assert len(matched) == 1
+        # Escalated to the upstream exploit's class + severity.
+        assert matched[0].bug_class == "auth_bypass"
+        assert matched[0].severity_hint == "critical"
+        # CVE ID is in the rationale so operators have the pivot.
+        assert "CVE-2022-1329" in matched[0].rationale
+
+    def test_info_disclosure_wp_version_disclosure_via_readme_html(
+        self,
+    ) -> None:
+        # Issue #34: ``/readme.html`` is WordPress's canonical
+        # version-disclosure endpoint. The body has
+        # ``<title>WordPress &rsaquo; ReadMe</title>`` and the
+        # version in the leading content. The bare
+        # ``_VERSION_BANNER_RE`` is JSON-shaped and doesn't match;
+        # ``_looks_like_user_array`` correctly rejects HTML. New
+        # detector closes the gap.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            '<!DOCTYPE html><html lang="en"><head>'
+            "<title>WordPress &rsaquo; ReadMe</title>"
+            "</head><body>"
+            "<h1>WordPress 6.4.2</h1>"
+            "<p>Semantic Personal Publishing Platform</p>"
+            "</body></html>"
+        )
+        obs = self._obs("obs-wp-readme", "http://target/readme.html", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:wp_version_disclosure"]
+        assert len(matched) == 1
+        assert matched[0].severity_hint == "info"
+        # Version string was extracted into the rationale.
+        assert "6.4.2" in matched[0].rationale
+
+    def test_info_disclosure_xmlrpc_methods_disclosure(self) -> None:
+        # Issue #33: ``POST /xmlrpc.php`` with ``system.listMethods``
+        # returns a ``methodResponse`` envelope listing available
+        # methods. That's the canonical "XML-RPC enabled" signal.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            '<?xml version="1.0"?>'
+            "<methodResponse><params><param><value><array><data>"
+            "<value><string>system.multicall</string></value>"
+            "<value><string>system.listMethods</string></value>"
+            "<value><string>demo.sayHello</string></value>"
+            "<value><string>wp.getUsersBlogs</string></value>"
+            "<value><string>pingback.ping</string></value>"
+            "</data></array></value></param></params></methodResponse>"
+        )
+        obs = self._obs("obs-xmlrpc", "http://target/xmlrpc.php", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:xmlrpc_methods_disclosure"]
+        assert len(matched) == 1
+        assert matched[0].severity_hint == "low"
+        # Method names appear in the rationale so operators can pivot
+        # (e.g. seeing ``pingback.ping`` → amplification path).
+        assert "pingback.ping" in matched[0].rationale
+
+    def test_info_disclosure_xmlrpc_skips_405_get(self) -> None:
+        # The 405 GET response is just text saying "POST only" — not
+        # a methodResponse. Detector must not fire.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-xmlrpc-405",
+            "http://target/xmlrpc.php",
+            200,  # status 405 is filtered out earlier; 200 with non-XML body
+            body="XML-RPC server accepts POST requests only.",
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:xmlrpc_methods_disclosure"]
+        assert matched == []
+
+    def test_info_disclosure_readme_html_without_wp_marker_skips(self) -> None:
+        # ``/readme.html`` from a non-WordPress project must not fire
+        # the WP-version detector.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "<!DOCTYPE html><html><head><title>Project ReadMe</title></head>"
+            "<body><h1>Other Project 1.2.3</h1></body></html>"
+        )
+        obs = self._obs("obs-other-readme", "http://target/readme.html", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if r.detector == "info_disclosure:wp_version_disclosure"]
+        assert matched == []
+
+    def test_info_disclosure_plugin_no_cve_match_keeps_info_severity(
+        self,
+    ) -> None:
+        # Slug IS in the registry (akismet has entries) but the
+        # current version isn't in any affected range. Falls back to
+        # the bare ``info_disclosure / info`` candidate.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = (
+            "=== Akismet ===\nContributors: matt\nStable tag: 5.3.0\n\nComment spam protection.\n"
+        )
+        obs = self._obs(
+            "obs-akismet",
+            "http://target/wp-content/plugins/akismet/readme.txt",
+            200,
+            body=body,
+        )
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        matched = [r for r in result if "plugin" in r.detector]
+        assert len(matched) == 1
+        assert matched[0].detector == "info_disclosure:plugin_version_disclosure"
+        assert matched[0].bug_class == "info_disclosure"
+        assert matched[0].severity_hint == "info"
 
     def test_info_disclosure_skips_test_fixture_value(self) -> None:
         from modus.evidence_patterns import detect_evidence_patterns

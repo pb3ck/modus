@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
+from modus import cve_registry
+
 if TYPE_CHECKING:
     from modus.session import SessionObservation
 
@@ -535,6 +537,30 @@ _BACKUP_FILE_PATH_RE = re.compile(
 
 _DOTENV_LINE_RE = re.compile(r"(?m)^[A-Z][A-Z0-9_]*\s*=")
 
+# WordPress's ``/readme.html`` is the canonical version-disclosure
+# endpoint. The path regex is exact (only this filename, not e.g.
+# ``readme.html.bak`` which would belong under ``config_backup_exposure``).
+_WP_README_HTML_PATH_RE = re.compile(r"/readme\.html$", re.IGNORECASE)
+# WordPress fingerprint markers in the readme body — at least one
+# must appear before we treat the page as a WP version disclosure.
+# Keeps the detector from firing on a generic ``/readme.html`` from
+# some other project.
+_WP_README_FINGERPRINT_MARKERS: tuple[str, ...] = (
+    "<title>WordPress",
+    "WordPress &rsaquo;",
+    "wordpress.org",
+)
+# Version-string regex tuned for WP's readme: ``Version 6.4.2``,
+# ``WordPress 6.4``, or a plain ``\d+\.\d+(\.\d+)?`` near a heading.
+_WP_README_VERSION_RE = re.compile(r"\b(\d+\.\d+(?:\.\d+)?)\b")
+
+# XML-RPC ``system.listMethods`` response. The 200 body contains a
+# ``<methodResponse>`` envelope with an array of ``<string>`` method
+# names. Path-gated to ``/xmlrpc.php`` to keep the detector tight.
+_XMLRPC_PATH_RE = re.compile(r"/xmlrpc\.php$", re.IGNORECASE)
+_XMLRPC_METHOD_RESPONSE_RE = re.compile(r"<methodResponse>", re.IGNORECASE)
+_XMLRPC_METHOD_NAME_RE = re.compile(r"<string>([\w.]+)</string>", re.IGNORECASE)
+
 
 def _looks_like_text_config(body: str) -> bool:
     """Conservative gate for "this looks like a config file response."
@@ -958,32 +984,79 @@ def _detect_info_disclosure(
             stable = _STABLE_TAG_RE.search(body)
             slug = slug_match.group(1) if slug_match else "?"
             version = stable.group(1).strip() if stable else "?"
-            out.append(
-                FallbackHypothesis(
-                    bug_class="info_disclosure",
-                    severity_hint="info",
-                    evidence_refs=(obs.id,),
-                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
-                        bug_class="info_disclosure",
-                        endpoint=path,
-                        curl_target=url,
-                        obs_id=obs.id,
-                        status=200,
-                        evidence_excerpt=(
-                            f"WordPress plugin {slug!r} fingerprinted at "
-                            f"version {version!r} via /readme.txt — "
-                            f"compare against a CVE database for known "
-                            f"vulnerabilities affecting this version"
+            # Consult the curated CVE registry. If the (slug, version)
+            # falls in a known CVE's affected range, escalate the
+            # candidate: switch bug_class to the upstream exploit's
+            # class, bump severity to the CVE's, append the CVE ID +
+            # summary to the rationale. When the registry has no
+            # entry, the candidate stays at ``info_disclosure / info``
+            # — version disclosure is still useful evidence on its own.
+            cve_matches = cve_registry.lookup_cves(slug, version)
+            if cve_matches:
+                # Pick the highest-severity CVE for the candidate's
+                # bug_class + severity. Multiple CVEs may apply to
+                # the same version range — operator triage gets the
+                # most-severe one front-and-center, with the rest in
+                # the rationale.
+                rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+                primary = max(cve_matches, key=lambda c: rank[c.severity])
+                cve_summary = "; ".join(f"{c.cve} ({c.severity}): {c.summary}" for c in cve_matches)
+                out.append(
+                    FallbackHypothesis(
+                        bug_class=primary.bug_class,
+                        severity_hint=primary.severity,
+                        evidence_refs=(obs.id,),
+                        rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                            bug_class=primary.bug_class,
+                            endpoint=path,
+                            curl_target=url,
+                            obs_id=obs.id,
+                            status=200,
+                            evidence_excerpt=(
+                                f"WordPress plugin {slug!r} fingerprinted at "
+                                f"version {version!r} via /readme.txt; "
+                                f"version falls in the affected range of "
+                                f"{len(cve_matches)} known CVE(s): "
+                                f"{cve_summary}"
+                            ),
+                            impact_note=(
+                                f"escalated from version disclosure to "
+                                f"{primary.bug_class} ({primary.severity}) "
+                                f"based on the matching CVE registry entry; "
+                                f"fixed in {primary.fixed_in or 'unknown'}"
+                            ),
                         ),
-                        impact_note=(
-                            "version disclosure on its own is informational, "
-                            "but pivots a hypothesizer toward exploit "
-                            "selection if any CVE matches the version range"
-                        ),
-                    ),
-                    detector="info_disclosure:plugin_version_disclosure",
+                        detector=f"info_disclosure:plugin_cve_match:{primary.cve}",
+                    )
                 )
-            )
+            else:
+                out.append(
+                    FallbackHypothesis(
+                        bug_class="info_disclosure",
+                        severity_hint="info",
+                        evidence_refs=(obs.id,),
+                        rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                            bug_class="info_disclosure",
+                            endpoint=path,
+                            curl_target=url,
+                            obs_id=obs.id,
+                            status=200,
+                            evidence_excerpt=(
+                                f"WordPress plugin {slug!r} fingerprinted at "
+                                f"version {version!r} via /readme.txt — "
+                                f"no entry in the curated CVE registry for "
+                                f"this version, but the fingerprint is still "
+                                f"useful pivot evidence"
+                            ),
+                            impact_note=(
+                                "version disclosure on its own is informational, "
+                                "but pivots a hypothesizer toward exploit "
+                                "selection if any CVE matches the version range"
+                            ),
+                        ),
+                        detector="info_disclosure:plugin_version_disclosure",
+                    )
+                )
             continue
         # 2. VCS directory exposure — ``/.git/<file>``, ``/.svn/<file>``,
         #    ``/.hg/<file>`` returning 200 with their characteristic
@@ -1018,7 +1091,90 @@ def _detect_info_disclosure(
                 )
             )
             continue
-        # 3. Config-backup exposure — ``*.bak``/``*.old``/``*~``/
+        # 3. WordPress version disclosure via /readme.html.
+        #    Tracked at issue #34. The page is the canonical WP
+        #    version-disclosure endpoint; the body contains
+        #    ``<title>WordPress &rsaquo; ReadMe</title>`` and a
+        #    version string in the leading H1 / paragraph. The bare
+        #    ``_VERSION_BANNER_RE`` doesn't match (it's JSON-shaped),
+        #    and ``_looks_like_user_array`` correctly rejects HTML.
+        if _WP_README_HTML_PATH_RE.search(path) and any(
+            marker in body[:2048] for marker in _WP_README_FINGERPRINT_MARKERS
+        ):
+            version_match = _WP_README_VERSION_RE.search(body[:2048])
+            version = version_match.group(1) if version_match else "?"
+            out.append(
+                FallbackHypothesis(
+                    bug_class="info_disclosure",
+                    severity_hint="info",
+                    evidence_refs=(obs.id,),
+                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                        bug_class="info_disclosure",
+                        endpoint=path,
+                        curl_target=url,
+                        obs_id=obs.id,
+                        status=200,
+                        evidence_excerpt=(
+                            f"WordPress version {version!r} disclosed via "
+                            f"the canonical /readme.html endpoint — the "
+                            f"page exposes core WP version, supported PHP "
+                            f"version, and links to upgrade documentation"
+                        ),
+                        impact_note=(
+                            "version disclosure on WordPress core is "
+                            "informational on its own, but pivots toward "
+                            "matching CVEs for the disclosed version and "
+                            "indicates the rest of the WP recon arc "
+                            "(plugins, REST API, xmlrpc) is in play"
+                        ),
+                    ),
+                    detector="info_disclosure:wp_version_disclosure",
+                )
+            )
+            continue
+        # 4. XML-RPC enabled — methods listing returned. Tracked at
+        #    issue #33. Fires when the body is an XML-RPC
+        #    ``methodResponse`` (the answer to a POST
+        #    ``system.listMethods`` call). Severity is low: enabled
+        #    XML-RPC on its own is a minor exposure, but the surface
+        #    opens up amplification + brute-force vectors that
+        #    operators triage.
+        if (
+            _XMLRPC_PATH_RE.search(path)
+            and _XMLRPC_METHOD_RESPONSE_RE.search(body[:512])
+            and _XMLRPC_METHOD_NAME_RE.search(body)
+        ):
+            method_names = _XMLRPC_METHOD_NAME_RE.findall(body)[:8]
+            out.append(
+                FallbackHypothesis(
+                    bug_class="info_disclosure",
+                    severity_hint="low",
+                    evidence_refs=(obs.id,),
+                    rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                        bug_class="info_disclosure",
+                        endpoint=path,
+                        curl_target=url,
+                        obs_id=obs.id,
+                        status=200,
+                        evidence_excerpt=(
+                            f"XML-RPC enabled at {path} — "
+                            f"system.listMethods returned an enumerated "
+                            f"method set including: "
+                            f"{', '.join(method_names)}"
+                            f"{'...' if len(_XMLRPC_METHOD_NAME_RE.findall(body)) > 8 else ''}"
+                        ),
+                        impact_note=(
+                            "enabled XML-RPC exposes pingback amplification "
+                            "and brute-force vectors via system.multicall; "
+                            "low-severity on its own but worth disabling on "
+                            "modern WordPress deployments"
+                        ),
+                    ),
+                    detector="info_disclosure:xmlrpc_methods_disclosure",
+                )
+            )
+            continue
+        # 5. Config-backup exposure — ``*.bak``/``*.old``/``*~``/
         #    ``*.swp``/``.env`` paths returning 200 with text body.
         #    Distinct from the secret-content detector above: this fires
         #    even when the body lacks a recognised secret shape (e.g.

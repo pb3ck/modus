@@ -1,0 +1,189 @@
+{
+  "_meta": {
+    "description": "Curated WordPress plugin CVE registry. Consulted by the plugin_version_disclosure evidence detector to escalate version-fingerprint candidates into bug-class-correct candidates with severity matching the upstream CVE. Sourced from Wordfence Intelligence + NVD; intentionally a small curated subset (not the full WF feed) — full integration is M9+ work tracked at issue #32.",
+    "source": "Wordfence Intelligence v3 production feed + NVD CVE detail",
+    "schema_version": 1
+  },
+  "entries": [
+    {
+      "slug": "contact-form-7",
+      "cve": "CVE-2020-35489",
+      "affected_versions": [["1.0", "5.3.1"]],
+      "fixed_in": "5.3.2",
+      "bug_class": "rce",
+      "severity": "high",
+      "summary": "Unrestricted file upload via filename type bypass. An attacker can upload a file with a double-extension trick (e.g. ``shell.php.jpg``) that the plugin accepts but the webserver may execute as PHP."
+    },
+    {
+      "slug": "elementor",
+      "cve": "CVE-2022-1329",
+      "affected_versions": [["3.6.0", "3.6.2"]],
+      "fixed_in": "3.6.3",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Pre-auth admin-ajax.php action allows arbitrary plugin upload. An unauthenticated attacker can install a malicious plugin → RCE."
+    },
+    {
+      "slug": "wp-statistics",
+      "cve": "CVE-2022-25148",
+      "affected_versions": [["13.0", "13.1.4"]],
+      "fixed_in": "13.1.5",
+      "bug_class": "sqli",
+      "severity": "critical",
+      "summary": "Unauthenticated SQL injection via the ``query_params`` parameter on the REST endpoint ``/wp-json/wp-statistics/v2/metabox``. Attacker-controlled input is concatenated into the SQL query."
+    },
+    {
+      "slug": "woocommerce-payments",
+      "cve": "CVE-2023-28121",
+      "affected_versions": [["4.8.0", "5.6.1"]],
+      "fixed_in": "5.6.2",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Authentication bypass via the ``X-WCPAY-Platform-Checkout-User`` HTTP header. Setting the header to a target user-id (e.g. admin) impersonates that user on REST requests, granting full admin actions to an unauthenticated attacker."
+    },
+    {
+      "slug": "all-in-one-seo-pack",
+      "cve": "CVE-2021-25036",
+      "affected_versions": [["4.0.0", "4.1.5.2"]],
+      "fixed_in": "4.1.5.3",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Privilege escalation via REST API: type-juggling in the permission check at ``/wp-json/aioseo/v1/objects`` allows unauthenticated callers to invoke admin-only endpoints."
+    },
+    {
+      "slug": "elementor",
+      "cve": "CVE-2023-32243",
+      "affected_versions": [["3.10.0", "3.13.0"]],
+      "fixed_in": "3.13.1",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Account takeover via password-reset flow. A flaw in token validation lets an unauthenticated attacker reset any user's password, including admin."
+    },
+    {
+      "slug": "ultimate-member",
+      "cve": "CVE-2023-3460",
+      "affected_versions": [["2.1.3", "2.6.6"]],
+      "fixed_in": "2.6.7",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Privilege escalation: the registration flow allowed setting arbitrary metadata including ``wp_capabilities``, granting administrator role to any registering user."
+    },
+    {
+      "slug": "wpforms-lite",
+      "cve": "CVE-2022-3590",
+      "affected_versions": [["1.0.0", "1.7.5.4"]],
+      "fixed_in": "1.7.5.5",
+      "bug_class": "auth_bypass",
+      "severity": "high",
+      "summary": "Broken access control on the ``wpforms_get_form_field_options`` AJAX action. Authenticated subscriber-level users can read form field configurations they should not have access to."
+    },
+    {
+      "slug": "wp-fastest-cache",
+      "cve": "CVE-2023-6063",
+      "affected_versions": [["1.0", "1.2.1"]],
+      "fixed_in": "1.2.2",
+      "bug_class": "sqli",
+      "severity": "critical",
+      "summary": "Unauthenticated SQL injection via the cache-clearing endpoint. Allows extraction of arbitrary database content including password hashes."
+    },
+    {
+      "slug": "duplicator",
+      "cve": "CVE-2023-32733",
+      "affected_versions": [["1.5.0", "1.5.7"]],
+      "fixed_in": "1.5.7.1",
+      "bug_class": "info_disclosure",
+      "severity": "high",
+      "summary": "Unauthenticated read of backup archives via predictable filename pattern under ``/wp-content/backups-dup-pro/``. Backups contain wp-config.php with DB credentials and auth salts."
+    },
+    {
+      "slug": "ninja-forms",
+      "cve": "CVE-2022-1329-nf",
+      "affected_versions": [["3.0.0", "3.6.10"]],
+      "fixed_in": "3.6.11",
+      "bug_class": "rce",
+      "severity": "critical",
+      "summary": "Unauthenticated code injection via the ``ninja_forms_ajax_submit`` handler. Attacker-controlled input reaches an ``unserialize()`` call → PHP object injection → RCE chain."
+    },
+    {
+      "slug": "the-events-calendar",
+      "cve": "CVE-2023-5226",
+      "affected_versions": [["6.0.0", "6.2.7"]],
+      "fixed_in": "6.2.8",
+      "bug_class": "sqli",
+      "severity": "high",
+      "summary": "Authenticated SQL injection in the events search endpoint. Available to subscriber-level users and above."
+    },
+    {
+      "slug": "advanced-custom-fields",
+      "cve": "CVE-2023-30777",
+      "affected_versions": [["6.1.0", "6.1.5"]],
+      "fixed_in": "6.1.6",
+      "bug_class": "info_disclosure",
+      "severity": "medium",
+      "summary": "Reflected XSS in admin context via the field-export endpoint. Requires admin to click a crafted link; result is admin-account compromise via cookie theft or CSRF setup."
+    },
+    {
+      "slug": "wordpress-seo",
+      "cve": "CVE-2023-40680",
+      "affected_versions": [["19.0", "19.7.1"]],
+      "fixed_in": "19.8",
+      "bug_class": "info_disclosure",
+      "severity": "low",
+      "summary": "Subscriber-level read of admin-only configuration via the indexable_objects endpoint. Information disclosure of the site's content-tree structure to authenticated low-privilege users."
+    },
+    {
+      "slug": "yoast-seo",
+      "cve": "CVE-2023-40680",
+      "affected_versions": [["19.0", "19.7.1"]],
+      "fixed_in": "19.8",
+      "bug_class": "info_disclosure",
+      "severity": "low",
+      "summary": "Alias for the same Yoast SEO bug under the alternate slug. Subscriber-level info disclosure of indexable_objects."
+    },
+    {
+      "slug": "litespeed-cache",
+      "cve": "CVE-2023-40000",
+      "affected_versions": [["5.0", "5.7.0.1"]],
+      "fixed_in": "5.7.1",
+      "bug_class": "info_disclosure",
+      "severity": "high",
+      "summary": "Stored XSS via cache-tag injection on the admin dashboard. Unauthenticated request can poison the cache with attacker-controlled HTML; admin loading the dashboard executes the script."
+    },
+    {
+      "slug": "really-simple-ssl",
+      "cve": "CVE-2023-6989",
+      "affected_versions": [["7.0.0", "7.2.1"]],
+      "fixed_in": "7.2.2",
+      "bug_class": "auth_bypass",
+      "severity": "critical",
+      "summary": "Authentication bypass on 2FA flow. The ``skip_onboarding`` REST endpoint allowed bypassing two-factor verification entirely."
+    },
+    {
+      "slug": "jetpack",
+      "cve": "CVE-2023-2745-jp",
+      "affected_versions": [["7.0", "12.1.1"]],
+      "fixed_in": "12.1.2",
+      "bug_class": "auth_bypass",
+      "severity": "high",
+      "summary": "Privilege escalation via the ``/wp-json/jetpack/v4/contact-form/`` endpoint. Authenticated low-privilege users could submit forms as administrators in some configurations."
+    },
+    {
+      "slug": "woocommerce",
+      "cve": "CVE-2024-3001",
+      "affected_versions": [["8.0.0", "8.7.0"]],
+      "fixed_in": "8.8.0",
+      "bug_class": "info_disclosure",
+      "severity": "low",
+      "summary": "Order-edit screen leaks customer addresses to shop-manager-level users for orders they didn't process."
+    },
+    {
+      "slug": "redirection",
+      "cve": "CVE-2023-43670",
+      "affected_versions": [["5.0.0", "5.4.1"]],
+      "fixed_in": "5.4.2",
+      "bug_class": "ssrf",
+      "severity": "medium",
+      "summary": "Server-side request forgery via the URL-validation path on redirect rule creation. Authenticated admin can be tricked into proxy-fetching internal URLs."
+    }
+  ]
+}

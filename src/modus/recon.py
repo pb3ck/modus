@@ -317,6 +317,82 @@ def build_misconfig_proposals(
     return out
 
 
+# XML-RPC multi-method detection (issue #33). When ``/xmlrpc.php``
+# GET returns 405 (method not allowed — XML-RPC only accepts POST),
+# the next-step scout queues a POST with a ``system.listMethods``
+# SOAP-shaped body. The 200 response is what the
+# ``xmlrpc_methods_disclosure`` evidence detector picks up.
+_XMLRPC_LIST_METHODS_BODY = (
+    '<?xml version="1.0"?>'
+    "<methodCall><methodName>system.listMethods</methodName>"
+    "<params/></methodCall>"
+)
+# Path matches that signal a GET on ``/xmlrpc.php`` was already done
+# AND returned 405 — the cue to queue the POST follow-up. The history
+# string format is ``... GET <url> status=405 ...``.
+_XMLRPC_GET_405_RE = re.compile(
+    r"\bGET\s+(?P<scheme>https?)://(?P<host>[\w.\-]+)(?::(?P<port>\d+))?/xmlrpc\.php\b[^\n]*\bstatus=405\b",
+    re.IGNORECASE,
+)
+
+
+def build_xmlrpc_followup_proposals(
+    scope: ScopePolicy,
+    recent_history: tuple[str, ...],
+) -> list[Action]:
+    """Emit ``POST /xmlrpc.php`` with ``system.listMethods`` body when
+    a prior GET returned 405 on the same host. Issue #33.
+
+    The 405 is XML-RPC's tell that the endpoint exists and is enabled
+    — it only accepts POST. The follow-up confirms enablement by
+    listing the available methods (which the
+    ``xmlrpc_methods_disclosure`` detector then promotes).
+
+    History-mirrored: only fires for ``(host, port, tls)`` triples
+    actually observed in this run's GET 405s, never invents
+    transports. Skips hosts where the POST has already executed.
+    """
+    if "POST" not in scope.allowed_methods:
+        return []
+    seen_405: dict[tuple[str, int, bool], None] = {}
+    seen_post: set[str] = set()
+    for line in recent_history:
+        match = _XMLRPC_GET_405_RE.search(line)
+        if match:
+            host = match.group("host")
+            tls = match.group("scheme") == "https"
+            port_s = match.group("port")
+            port = int(port_s) if port_s else (443 if tls else 80)
+            seen_405[(host, port, tls)] = None
+        if "POST " in line and "/xmlrpc.php" in line:
+            # Reconstruct the action key so we don't propose duplicates.
+            url_match = _HISTORY_URL_RE.search(line)
+            if url_match:
+                seen_post.add(
+                    f"{url_match.group('scheme')}://{url_match.group('host')}"
+                    f"{(':' + url_match.group('port')) if url_match.group('port') else ''}"
+                    "/xmlrpc.php"
+                )
+    out: list[Action] = []
+    for (host, port, tls), _ in seen_405.items():
+        scheme = "https" if tls else "http"
+        url_key = f"{scheme}://{host}:{port}/xmlrpc.php"
+        if url_key in seen_post:
+            continue
+        out.append(
+            Request(
+                target=host,
+                method="POST",
+                path="/xmlrpc.php",
+                port=port,
+                tls=tls,
+                headers={"Content-Type": "text/xml"},
+                body=_XMLRPC_LIST_METHODS_BODY,
+            )
+        )
+    return out
+
+
 def build_wp_plugin_proposals(
     scope: ScopePolicy,
     recent_history: tuple[str, ...],
@@ -363,6 +439,7 @@ __all__ = [
     "WP_POPULAR_PLUGIN_SLUGS",
     "build_misconfig_proposals",
     "build_wp_plugin_proposals",
+    "build_xmlrpc_followup_proposals",
     "discover_endpoints",
     "looks_like_wordpress",
 ]

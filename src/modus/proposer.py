@@ -51,7 +51,11 @@ from openai import AsyncOpenAI
 from pydantic import TypeAdapter, ValidationError
 
 from modus.actions import Action
-from modus.recon import build_misconfig_proposals, build_wp_plugin_proposals
+from modus.recon import (
+    build_misconfig_proposals,
+    build_wp_plugin_proposals,
+    build_xmlrpc_followup_proposals,
+)
 
 if TYPE_CHECKING:
     from modus.consistency import CorpusState
@@ -794,6 +798,14 @@ class ReconAugmentedProposer:
     async def propose(self, context: StepContext) -> list[Action]:
         proposals = await self._inner.propose(context)
 
+        # Always-on follow-ups that key off specific history signals
+        # (rather than parity-based scheduling). These are tightly
+        # gated so they don't crowd the LLM batch — only fire when a
+        # specific recon result calls for them.
+        followups: list[Action] = list(
+            build_xmlrpc_followup_proposals(self._scope, context.recent_history)
+        )
+
         # Two-level interleave:
         #
         # 1. **LLM vs scout** by history-length parity. Even-parity
@@ -820,7 +832,7 @@ class ReconAugmentedProposer:
         # within budget — enough for the highest-installed-base slugs.
         history_len = len(context.recent_history)
         if history_len % 2 == 0:
-            return list(proposals)
+            return [*followups, *proposals]
 
         # Scout step index counts only the scout-led iterations, so
         # bucket alternation tracks scout-budget rather than total
@@ -838,7 +850,7 @@ class ReconAugmentedProposer:
                 context.recent_history,
                 limit=self._plugin_per_step,
             )
-        return [*scout, *proposals]
+        return [*followups, *scout, *proposals]
 
 
 def make_proposer(

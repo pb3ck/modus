@@ -31,6 +31,7 @@ from modus.recon import (
     WP_POPULAR_PLUGIN_SLUGS,
     build_misconfig_proposals,
     build_wp_plugin_proposals,
+    build_xmlrpc_followup_proposals,
     discover_endpoints,
     looks_like_wordpress,
 )
@@ -249,6 +250,84 @@ class TestBuildWpPluginProposals:
 
 
 # ----------------------------------------------------------- ReconAugmentedProposer
+
+
+class TestXmlrpcFollowup:
+    """Issue #33: when ``GET /xmlrpc.php`` returns 405, queue a
+    ``POST`` with ``system.listMethods`` to confirm enablement."""
+
+    def test_emits_post_when_get_returned_405(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/xmlrpc.php status=405 body_len=42",
+        )
+        proposals = build_xmlrpc_followup_proposals(scope, history)
+        assert len(proposals) == 1
+        assert isinstance(proposals[0], Request)
+        assert proposals[0].method == "POST"
+        assert proposals[0].path == "/xmlrpc.php"
+        assert proposals[0].port == 8080
+        assert proposals[0].tls is False
+        assert "system.listMethods" in (proposals[0].body or "")
+
+    def test_skips_when_post_already_executed(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/xmlrpc.php status=405 body_len=42",
+            "step 1: request POST http://foo.example.com:8080/xmlrpc.php status=200 body_len=4000",
+        )
+        proposals = build_xmlrpc_followup_proposals(scope, history)
+        assert proposals == []
+
+    def test_silent_when_get_was_not_405(self) -> None:
+        # GET returned 404 instead of 405 → endpoint isn't there →
+        # no POST follow-up.
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/xmlrpc.php status=404 body_len=10",
+        )
+        proposals = build_xmlrpc_followup_proposals(scope, history)
+        assert proposals == []
+
+    def test_silent_when_post_not_in_allowed_methods(self) -> None:
+        # Scope only allows GET → no POST proposals (consistency would
+        # reject anyway, but we don't even propose).
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/xmlrpc.php status=405 body_len=42",
+        )
+        proposals = build_xmlrpc_followup_proposals(scope, history)
+        assert proposals == []
+
+    def test_emits_per_host_with_405(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://a.example.com:8080", "http://b.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://a.example.com:8080/xmlrpc.php status=405 body_len=42",
+            "step 1: request GET http://b.example.com:8080/xmlrpc.php status=405 body_len=42",
+        )
+        proposals = build_xmlrpc_followup_proposals(scope, history)
+        targets = {p.target for p in proposals}
+        assert targets == {"a.example.com", "b.example.com"}
 
 
 class TestReconAugmentedProposer:
