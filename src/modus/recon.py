@@ -172,22 +172,28 @@ _WP_HEADER_MARKERS: tuple[str, ...] = (
 def discover_endpoints(
     scope: ScopePolicy, recent_history: tuple[str, ...]
 ) -> tuple[tuple[str, int, bool], ...]:
-    """Return concrete ``(host, port, tls)`` triples to probe.
+    """Return concrete ``(host, port, tls)`` triples worth probing.
 
-    Per-host mirroring: each scope host gets at least one triple in the
-    output. If the host has appeared in history, all of its observed
-    ``(port, tls)`` triples are returned (the LLM has already established
-    the right transports). If the host hasn't appeared in history yet —
-    common in early steps before the LLM has discovered every host — the
-    scope's parsed endpoint is used (defaulting port=None / tls=None to
-    ``(80, False)``).
+    Per-host policy:
 
-    The 2026-05-09 wp-lab calibration baseline regression caught an
-    earlier bug here: the all-or-nothing rule meant once any host
-    appeared in history, every host without history was excluded from
-    the scout. Concretely, woo-shop got zero scout coverage for steps
-    1-3 because corp-marketing had been probed first. Per-host fallback
-    fixes that.
+    * If the host has appeared in history with at least one
+      ``(port, tls)`` triple, mirror those — the LLM has established
+      the right transport.
+    * If the host hasn't appeared in history but the scope entry has
+      an explicit port (e.g. ``http://hostname:8080``), use it. The
+      operator told us the right transport.
+    * If the host hasn't appeared in history AND the scope entry is
+      a bare hostname (no port — ``port=None``), return nothing for
+      this host. The right transport is unknown; let the LLM
+      establish it on its first probe rather than burning budget on
+      port 80 / 443 guesses that can return ``Connection refused``.
+
+    The third rule is the lesson from the 2026-05-09 wp-lab v3 run:
+    20 of 38 steps were wasted probing ``http://corp.lab.test:80/...``
+    because the bare hostname defaulted to port 80, but the lab runs
+    on 8080. With the scout silent on step 0, the LLM probes the
+    correct port (the objective told it 8080), history populates, and
+    scout starts contributing in step 1+ on the right transport.
     """
     seen_per_host: dict[str, set[tuple[int, bool]]] = {}
     scope_hosts = {ep.host for ep in scope.endpoints()}
@@ -208,11 +214,11 @@ def discover_endpoints(
             # Mirror the (port, tls) triples actually probed for this host.
             for port, tls in seen_per_host[host]:
                 out.add((host, port, tls))
-        else:
-            # Scope-derived fallback for hosts not yet in history.
-            port = ep.port if ep.port is not None else 80
-            tls = ep.tls if ep.tls is not None else False
-            out.add((host, port, tls))
+        elif ep.port is not None:
+            # Scope is explicit about the port — safe to use.
+            tls = ep.tls if ep.tls is not None else (ep.port == 443)
+            out.add((host, ep.port, tls))
+        # else: bare hostname, no history. Stay silent for this host.
     return tuple(sorted(out))
 
 

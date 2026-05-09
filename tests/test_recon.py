@@ -60,15 +60,24 @@ def _ctx(scope: ScopePolicy, history: tuple[str, ...] = ()) -> StepContext:
 
 
 class TestDiscoverEndpoints:
-    def test_falls_back_to_scope_when_no_history(self) -> None:
+    def test_bare_hostname_with_no_history_is_silent(self) -> None:
+        # The 2026-05-09 wp-lab v3 baseline showed why: with bare
+        # hostnames in scope and no history, scout would default to
+        # port 80, but the lab actually runs on 8080. 20 of 38 steps
+        # got burned probing :80 paths that returned status=0. Now
+        # scout stays silent until the LLM discovers the right port.
         scope = _scope("foo.example.com", "bar.example.com")
         triples = discover_endpoints(scope, ())
-        # Bare hostnames default to (port=80, tls=False) per the
-        # docstring — Modus probes plain HTTP first when nothing else
-        # is known. The consistency layer will reject these if scope
-        # turns out to require TLS.
-        assert ("foo.example.com", 80, False) in triples
-        assert ("bar.example.com", 80, False) in triples
+        assert triples == ()
+
+    def test_uses_scope_port_when_explicit(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        triples = discover_endpoints(scope, ())
+        assert triples == (("foo.example.com", 8080, False),)
 
     def test_mirrors_endpoints_from_history(self) -> None:
         scope = _scope("foo.example.com")
@@ -316,7 +325,13 @@ class TestReconAugmentedProposer:
 
     @pytest.mark.asyncio
     async def test_explicit_caps(self) -> None:
-        scope = _scope("foo.example.com")
+        # Use scope with explicit port so scout has a transport to use.
+        # Bare hostnames + no history → scout silent (covered separately).
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET"}),
+        )
         inner = FixedProposer([])
         wrapped = ReconAugmentedProposer(
             inner,
