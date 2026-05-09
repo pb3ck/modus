@@ -51,6 +51,7 @@ from openai import AsyncOpenAI
 from pydantic import TypeAdapter, ValidationError
 
 from modus.actions import Action
+from modus.recon import build_misconfig_proposals, build_wp_plugin_proposals
 
 if TYPE_CHECKING:
     from modus.consistency import CorpusState
@@ -729,11 +730,45 @@ class ClaudeCliProposer(_LlmProposerBase):
 # ----------------------------------------------------------- factory
 
 
+class ReconAugmentedProposer:
+    """Wraps another :class:`Proposer` with a deterministic recon floor.
+
+    The wrapped proposer's batch is returned first — the LLM still leads
+    creative path choice. Appended after it: high-signal misconfig probes
+    (``/.git/config``, ``/wp-config.php.bak``, ``/wp-content/debug.log``,
+    etc.) and, once a WordPress signal is detected, plugin-readme
+    fingerprint probes for ~30 popular plugin slugs.
+
+    The agent loop's "first novel survivor" ranker means LLM proposals
+    win when they're novel; the scout fills the gap when LLM proposals
+    duplicate prior actions. Net effect: the LLM keeps primacy on
+    creative paths, but the long-tail of well-known misconfig and
+    plugin-fingerprint paths is guaranteed to land within the budget.
+
+    Disable per-session by setting ``recon_floor=False`` on construction
+    if the operator wants pure LLM-driven recon (e.g. for ablation
+    measurement against the calibration lab).
+    """
+
+    def __init__(self, inner: Proposer, *, scope: ScopePolicy) -> None:
+        self._inner = inner
+        self._scope = scope
+
+    async def propose(self, context: StepContext) -> list[Action]:
+        proposals = await self._inner.propose(context)
+        scout: list[Action] = []
+        scout.extend(build_misconfig_proposals(self._scope, context.recent_history))
+        scout.extend(build_wp_plugin_proposals(self._scope, context.recent_history))
+        # Append: LLM-led, scout fills gaps.
+        return [*proposals, *scout]
+
+
 def make_proposer(
     *,
     llm: LlmProviderConfig,
     scope: ScopePolicy,
     mcp_session: Any | None = None,
+    recon_floor: bool = True,
 ) -> Proposer:
     """Construct the right proposer for the operator's configured provider.
 
@@ -745,7 +780,13 @@ def make_proposer(
     When ``llm.provider == "host"``, the caller must pass the
     in-flight MCP session so the proposer can route sampling requests
     back to the host. Other providers ignore ``mcp_session``.
+
+    The result is wrapped with :class:`ReconAugmentedProposer` unless
+    ``recon_floor=False`` — that adds a deterministic floor of common
+    misconfig and WordPress plugin probes to every proposal batch.
+    Operators measuring pure-LLM recon can opt out.
     """
+    inner: Proposer
     if llm.provider == "host":
         if mcp_session is None:
             raise ValueError(
@@ -754,23 +795,28 @@ def make_proposer(
                 "ServerSession; this proposer cannot work outside an "
                 "MCP request context."
             )
-        return HostSamplingProposer(scope=scope, mcp_session=mcp_session)
-    if llm.provider == "claude-cli":
-        return ClaudeCliProposer(
+        inner = HostSamplingProposer(scope=scope, mcp_session=mcp_session)
+    elif llm.provider == "claude-cli":
+        inner = ClaudeCliProposer(
             scope=scope,
             claude_bin=llm.base_url or "claude",
             model=llm.model,
         )
-    if llm.provider == "anthropic":
-        return AnthropicProposer(scope=scope, api_key=llm.api_key, model=llm.model)
-    if llm.provider in ("openai", "openai-compatible"):
-        return OpenAICompatibleProposer(
+    elif llm.provider == "anthropic":
+        inner = AnthropicProposer(scope=scope, api_key=llm.api_key, model=llm.model)
+    elif llm.provider in ("openai", "openai-compatible"):
+        inner = OpenAICompatibleProposer(
             scope=scope,
             api_key=llm.api_key,
             base_url=llm.base_url,
             model=llm.model,
         )
-    raise ValueError(f"unsupported LLM provider: {llm.provider!r}")
+    else:
+        raise ValueError(f"unsupported LLM provider: {llm.provider!r}")
+
+    if recon_floor:
+        return ReconAugmentedProposer(inner, scope=scope)
+    return inner
 
 
 # ----------------------------------------------------------- test helpers
@@ -797,6 +843,7 @@ __all__ = [
     "HostSamplingProposer",
     "OpenAICompatibleProposer",
     "Proposer",
+    "ReconAugmentedProposer",
     "StepContext",
     "make_proposer",
 ]

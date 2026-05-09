@@ -301,7 +301,15 @@ class TestOpenAICompatibleProposer:
 
 
 class TestMakeProposer:
+    """``make_proposer`` returns the inner provider wrapped in
+    :class:`ReconAugmentedProposer` by default — that wrapper adds the
+    deterministic recon floor (#2 / #3 from the 2026-05-09 wp-lab
+    calibration baseline). Operators measuring pure-LLM recon can opt
+    out via ``recon_floor=False``."""
+
     def test_anthropic_provider(self) -> None:
+        from modus.proposer import ReconAugmentedProposer
+
         cfg = LlmProviderConfig(provider="anthropic", model=None, api_key="sk-test", base_url=None)
         # Don't actually instantiate the upstream client — just verify dispatch.
         # Use a sentinel client to bypass network init.
@@ -309,17 +317,31 @@ class TestMakeProposer:
 
         with patch("modus.proposer.AsyncAnthropic"):
             proposer = make_proposer(llm=cfg, scope=_scope())
+        assert isinstance(proposer, ReconAugmentedProposer)
+        assert isinstance(proposer._inner, AnthropicProposer)
+
+    def test_anthropic_provider_opt_out(self) -> None:
+        cfg = LlmProviderConfig(provider="anthropic", model=None, api_key="sk-test", base_url=None)
+        from unittest.mock import patch
+
+        with patch("modus.proposer.AsyncAnthropic"):
+            proposer = make_proposer(llm=cfg, scope=_scope(), recon_floor=False)
         assert isinstance(proposer, AnthropicProposer)
 
     def test_openai_provider(self) -> None:
+        from modus.proposer import ReconAugmentedProposer
+
         cfg = LlmProviderConfig(provider="openai", model=None, api_key="sk-test", base_url=None)
         from unittest.mock import patch
 
         with patch("modus.proposer.AsyncOpenAI"):
             proposer = make_proposer(llm=cfg, scope=_scope())
-        assert isinstance(proposer, OpenAICompatibleProposer)
+        assert isinstance(proposer, ReconAugmentedProposer)
+        assert isinstance(proposer._inner, OpenAICompatibleProposer)
 
     def test_openai_compatible_provider(self) -> None:
+        from modus.proposer import ReconAugmentedProposer
+
         cfg = LlmProviderConfig(
             provider="openai-compatible",
             model="llama3",
@@ -330,7 +352,8 @@ class TestMakeProposer:
 
         with patch("modus.proposer.AsyncOpenAI"):
             proposer = make_proposer(llm=cfg, scope=_scope())
-        assert isinstance(proposer, OpenAICompatibleProposer)
+        assert isinstance(proposer, ReconAugmentedProposer)
+        assert isinstance(proposer._inner, OpenAICompatibleProposer)
 
     def test_unknown_provider_rejected(self) -> None:
         cfg = LlmProviderConfig(
@@ -348,7 +371,7 @@ class TestMakeProposer:
             make_proposer(llm=cfg, scope=_scope())
 
     def test_host_provider_constructs_with_session(self) -> None:
-        from modus.proposer import HostSamplingProposer
+        from modus.proposer import HostSamplingProposer, ReconAugmentedProposer
 
         cfg = LlmProviderConfig(provider="host", model=None, api_key=None, base_url=None)
 
@@ -356,7 +379,8 @@ class TestMakeProposer:
             async def create_message(self, **_: Any) -> Any: ...
 
         proposer = make_proposer(llm=cfg, scope=_scope(), mcp_session=_FakeMcpSession())
-        assert isinstance(proposer, HostSamplingProposer)
+        assert isinstance(proposer, ReconAugmentedProposer)
+        assert isinstance(proposer._inner, HostSamplingProposer)
 
 
 class TestHostSamplingProposer:
@@ -547,7 +571,7 @@ class TestClaudeCliProposer:
 
 class TestMakeProposerClaudeCli:
     def test_claude_cli_provider_constructs(self) -> None:
-        from modus.proposer import ClaudeCliProposer
+        from modus.proposer import ClaudeCliProposer, ReconAugmentedProposer
 
         cfg = LlmProviderConfig(
             provider="claude-cli",
@@ -556,7 +580,8 @@ class TestMakeProposerClaudeCli:
             base_url="/usr/local/bin/claude",
         )
         proposer = make_proposer(llm=cfg, scope=_scope())
-        assert isinstance(proposer, ClaudeCliProposer)
+        assert isinstance(proposer, ReconAugmentedProposer)
+        assert isinstance(proposer._inner, ClaudeCliProposer)
 
     def test_claude_cli_provider_default_binary_when_no_base_url(self) -> None:
         from modus.proposer import ClaudeCliProposer
@@ -567,7 +592,10 @@ class TestMakeProposerClaudeCli:
             api_key=None,
             base_url=None,
         )
-        proposer = make_proposer(llm=cfg, scope=_scope())
+        # Use recon_floor=False here so we can reach the inner ClaudeCliProposer
+        # directly and verify the binary-resolution behavior — that's the
+        # specific concern this test guards.
+        proposer = make_proposer(llm=cfg, scope=_scope(), recon_floor=False)
         assert isinstance(proposer, ClaudeCliProposer)
         # Default binary name "claude" (relies on PATH at run time).
         assert proposer._claude_bin == "claude"  # type: ignore[attr-defined]
