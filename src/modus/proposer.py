@@ -794,27 +794,51 @@ class ReconAugmentedProposer:
     async def propose(self, context: StepContext) -> list[Action]:
         proposals = await self._inner.propose(context)
 
-        # Alternate scout-led and LLM-led steps. The 2026-05-09 wp-lab
-        # v4 baseline showed unconditional scout prepend crushes LLM
-        # creativity: scout's curated list always has an unprobed path
-        # to lead with, so it wins the "first novel survivor" race
-        # every single step. Even-parity (history_len even) is LLM-led
-        # — no scout prepended, the LLM batch flows through unchanged.
-        # Odd-parity is scout-led — 1 misconfig + 1 plugin prepended in
-        # priority order. Net over a 40-step budget: ~20 LLM-led +
-        # ~20 scout-led actions; scout drains its top-20 priority
-        # paths and LLM owns the long-tail novelty exploration.
+        # Two-level interleave:
+        #
+        # 1. **LLM vs scout** by history-length parity. Even-parity
+        #    (length 0, 2, 4, ...) is LLM-led — no scout prepended,
+        #    the inner batch flows through unchanged. The 2026-05-09
+        #    v4 baseline showed why this matters: with scout prepending
+        #    every step, scout's curated list always has an unprobed
+        #    path to lead with, the LLM never wins the "first novel
+        #    survivor" race, recall fell to 6.7%. Half the steps go
+        #    to the LLM so it keeps emitting novel paths.
+        #
+        # 2. **Misconfig vs plugin** within scout-led steps. Without
+        #    bucket alternation, plugin proposals always sit *after*
+        #    misconfig in the scout batch — and scout's misconfig list
+        #    almost always has something unprobed (~30 paths x N
+        #    hosts). The 2026-05-09 v5 baseline showed plugin probes
+        #    never won a slot. Now scout-led steps alternate: scout
+        #    step #0 → misconfig only, scout step #1 → plugin only,
+        #    scout step #2 → misconfig, etc. Plugin gets dedicated
+        #    slots so plugin-CVE coverage starts to land.
+        #
+        # Net pattern over 40 steps: 20 LLM-led, 10 misconfig-led,
+        # 10 plugin-led. Plugin sweep drains 10 of its priority list
+        # within budget — enough for the highest-installed-base slugs.
         history_len = len(context.recent_history)
         if history_len % 2 == 0:
             return list(proposals)
 
-        misconfig = build_misconfig_proposals(
-            self._scope, context.recent_history, limit=self._misconfig_per_step
-        )
-        plugin = build_wp_plugin_proposals(
-            self._scope, context.recent_history, limit=self._plugin_per_step
-        )
-        return [*misconfig, *plugin, *proposals]
+        # Scout step index counts only the scout-led iterations, so
+        # bucket alternation tracks scout-budget rather than total
+        # session steps.
+        scout_step_index = history_len // 2
+        if scout_step_index % 2 == 0:
+            scout = build_misconfig_proposals(
+                self._scope,
+                context.recent_history,
+                limit=self._misconfig_per_step,
+            )
+        else:
+            scout = build_wp_plugin_proposals(
+                self._scope,
+                context.recent_history,
+                limit=self._plugin_per_step,
+            )
+        return [*scout, *proposals]
 
 
 def make_proposer(

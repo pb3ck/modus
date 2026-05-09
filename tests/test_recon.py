@@ -252,89 +252,122 @@ class TestBuildWpPluginProposals:
 
 
 class TestReconAugmentedProposer:
-    @pytest.mark.asyncio
-    async def test_prepends_scout_on_odd_parity_step(self) -> None:
-        # Odd-parity step (history length 1, 3, 5, ...) → scout-led:
-        # 1 misconfig + 1 plugin (with WP signal) prepended ahead of
-        # the LLM batch so they win the agent loop's "first novel
-        # survivor" race. This is half the steps; the other half are
-        # LLM-led to keep creativity in the budget.
-        scope = _scope("foo.example.com")
-        history = (
-            "step 0: request GET http://foo.example.com:8080/ status=200 "
-            "body_excerpt='/wp-content/themes/x/style.css'",
-        )
-        inner_action = Probe(target="foo.example.com", aspect="httpx")
-        inner = FixedProposer([inner_action])
-        wrapped = ReconAugmentedProposer(inner, scope=scope)
-        ctx = _ctx(scope, history)  # history length 1 → odd → scout-led
-        result = await wrapped.propose(ctx)
-        # Default 1+1 cap: 1 misconfig + 1 plugin + 1 inner = 3 total.
-        assert len(result) == 3
-        assert isinstance(result[0], Request)
-        # Highest-priority misconfig path leads.
-        assert result[0].path == "/.git/config"
-        assert isinstance(result[1], Request)
-        assert result[1].path.startswith("/wp-content/plugins/")
-        assert result[1].path.endswith("/readme.txt")
-        # Inner action at the tail.
-        assert result[-1] == inner_action
+    """The wrapper schedules at two interleave levels:
+
+    1. **LLM vs scout** by history-length parity (even → LLM-led).
+    2. **Misconfig vs plugin** within scout-led steps, alternating by
+       scout-step index. The 2026-05-09 v5 baseline caught the
+       motivation: without bucket alternation, plugin proposals always
+       sat after misconfig and never won a slot — plugin-CVE coverage
+       stayed at 0%.
+
+    Tests pin both levels.
+    """
 
     @pytest.mark.asyncio
     async def test_passes_through_inner_on_even_parity_step(self) -> None:
-        # Even-parity step (history length 0, 2, 4, ...) → LLM-led:
-        # the inner proposer's batch flows through with no scout
-        # prepended. The 2026-05-09 wp-lab v4 baseline showed why
-        # this matters: with scout prepending every step, the LLM
-        # never won the ranker race and recall fell to 6.7%.
+        # Even-parity (history length 0, 2, 4, ...) → LLM-led: scout
+        # is silent so the inner proposer keeps the slot.
         scope = _scope("foo.example.com")
-        # Empty history → length 0 → even parity → LLM-led.
         inner_action = Probe(target="foo.example.com", aspect="httpx")
         inner = FixedProposer([inner_action])
         wrapped = ReconAugmentedProposer(inner, scope=scope)
-        ctx = _ctx(scope, ())
+        ctx = _ctx(scope, ())  # length 0 → even
         result = await wrapped.propose(ctx)
-        # No scout — just the inner proposer's batch.
         assert result == [inner_action]
 
     @pytest.mark.asyncio
-    async def test_default_caps_are_one_plus_one(self) -> None:
-        # Scout-led step with WP signal → exactly 2 prepended scout
-        # actions (1 misconfig + 1 plugin). The cap is what keeps
-        # the LLM in the budget over a 40-step session.
+    async def test_first_scout_led_step_is_misconfig(self) -> None:
+        # First scout-led step (history length 1, scout_step_index 0)
+        # → misconfig bucket. Scout prepends 1 misconfig path; LLM
+        # batch follows.
         scope = _scope("foo.example.com")
         history = (
             "step 0: request GET http://foo.example.com:8080/ status=200 "
             "body_excerpt='/wp-content/themes/x/style.css'",
         )
-        inner = FixedProposer([])
+        inner_action = Probe(target="foo.example.com", aspect="httpx")
+        inner = FixedProposer([inner_action])
         wrapped = ReconAugmentedProposer(inner, scope=scope)
-        ctx = _ctx(scope, history)  # odd parity → scout-led
+        ctx = _ctx(scope, history)  # length 1, scout_step 0 → misconfig
         result = await wrapped.propose(ctx)
         assert len(result) == 2
+        assert isinstance(result[0], Request)
+        # Highest-priority misconfig path leads — /.git/config.
+        assert result[0].path == "/.git/config"
+        # No plugin path on a misconfig step.
+        assert "/wp-content/plugins/" not in result[0].path
+        assert result[-1] == inner_action
 
     @pytest.mark.asyncio
-    async def test_no_wp_signal_skips_plugin_proposals(self) -> None:
-        # Odd-parity scout-led step but no WP marker → only misconfig
-        # bucket fires. Plugin sweep stays gated.
+    async def test_second_scout_led_step_is_plugin(self) -> None:
+        # Second scout-led step (history length 3, scout_step_index 1)
+        # → plugin bucket. Scout prepends 1 plugin readme path.
         scope = _scope("foo.example.com")
-        history = ("step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",)
+        history = (
+            "step 0: request GET http://foo.example.com:8080/ status=200 "
+            "body_excerpt='/wp-content/themes/x/style.css'",
+            "step 1: request GET http://foo.example.com:8080/.git/config status=200 body_len=200",
+            "step 2: request GET http://foo.example.com:8080/readme.html status=200 body_len=8",
+        )
+        inner_action = Probe(target="foo.example.com", aspect="httpx")
+        inner = FixedProposer([inner_action])
+        wrapped = ReconAugmentedProposer(inner, scope=scope)
+        ctx = _ctx(scope, history)  # length 3, scout_step 1 → plugin
+        result = await wrapped.propose(ctx)
+        assert len(result) == 2
+        assert isinstance(result[0], Request)
+        # Plugin readme path leads.
+        assert result[0].path.startswith("/wp-content/plugins/")
+        assert result[0].path.endswith("/readme.txt")
+        assert result[-1] == inner_action
+
+    @pytest.mark.asyncio
+    async def test_third_scout_led_step_returns_to_misconfig(self) -> None:
+        # Third scout-led step (history length 5, scout_step_index 2)
+        # → misconfig again. Bucket alternation cycles through
+        # misconfig → plugin → misconfig → plugin → ...
+        scope = _scope("foo.example.com")
+        history = tuple(
+            f"step {i}: request GET http://foo.example.com:8080/p{i} "
+            f"status=200 body_excerpt='/wp-content/themes/x/style.css'"
+            for i in range(5)
+        )
         inner = FixedProposer([])
+        wrapped = ReconAugmentedProposer(inner, scope=scope)
+        ctx = _ctx(scope, history)  # length 5, scout_step 2 → misconfig
+        result = await wrapped.propose(ctx)
+        assert len(result) == 1
+        assert isinstance(result[0], Request)
+        # Misconfig path. /.git/config still novel since /p0../p4 are
+        # what's been probed.
+        assert not result[0].path.startswith("/wp-content/plugins/")
+
+    @pytest.mark.asyncio
+    async def test_plugin_step_silent_without_wp_signal(self) -> None:
+        # On a plugin scout step, if no WP marker has appeared in
+        # history, the plugin sweep is gated off. Result: scout
+        # contributes nothing, LLM owns the slot. Important for
+        # non-WordPress targets — we don't waste budget probing
+        # plugin readmes that can't exist.
+        scope = _scope("foo.example.com")
+        # Length 3 → scout_step 1 → plugin step. But no WP marker
+        # in history.
+        history = (
+            "step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",
+            "step 1: probe target=foo.example.com aspect=httpx",
+            "step 2: request GET http://foo.example.com:8080/api status=404 body_len=10",
+        )
+        inner_action = Probe(target="foo.example.com", aspect="httpx")
+        inner = FixedProposer([inner_action])
         wrapped = ReconAugmentedProposer(inner, scope=scope)
         ctx = _ctx(scope, history)
         result = await wrapped.propose(ctx)
-        plugin_paths = [
-            a for a in result if isinstance(a, Request) and "/wp-content/plugins/" in a.path
-        ]
-        assert plugin_paths == []
-        # /.git/config is the highest-priority misconfig — leads.
-        assert len(result) == 1
-        assert isinstance(result[0], Request)
-        assert result[0].path == "/.git/config"
+        # Plugin gate failed → scout silent → only inner's batch.
+        assert result == [inner_action]
 
     @pytest.mark.asyncio
-    async def test_explicit_caps(self) -> None:
-        # Use scope with explicit port so scout has a transport to use.
+    async def test_explicit_caps_misconfig_step(self) -> None:
         scope = ScopePolicy(
             target_name="t",
             allowed_assets=frozenset({"http://foo.example.com:8080"}),
@@ -347,8 +380,9 @@ class TestReconAugmentedProposer:
             misconfig_per_step=3,
             plugin_per_step=0,
         )
-        # Force odd parity so scout fires (history length 1).
+        # Force odd parity, scout_step 0 → misconfig step.
         ctx = _ctx(scope, ("step 0: dummy",))
         result = await wrapped.propose(ctx)
+        # cap=3 misconfig (plugin step would have 0).
         assert len(result) == 3
         assert all(isinstance(a, Request) for a in result)
