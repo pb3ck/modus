@@ -245,6 +245,79 @@ class TestDetectEvidencePatterns:
         assert result[0].severity_hint == "medium"
         assert result[0].evidence_refs == ("obs-3",)
 
+    def test_info_disclosure_does_not_match_wp_json_namespace_root(self) -> None:
+        # Regression: 2026-05-09 wp-lab calibration baseline promoted
+        # info_disclosure MEDIUM on /wp-json/ on both profiles. The
+        # response there is the WordPress REST API namespace listing —
+        # a single object with "namespaces":[...] and "routes":{...}
+        # whose route schemas mention "email":{"type":"string",...}
+        # dozens of times. The old heuristic ('"[" in body' AND
+        # email/UserId count >= 2) tripped on those route schemas.
+        # The new ``_looks_like_user_array`` requires the body to start
+        # with [{ AND have id+slug/avatar_urls fields in the head — a
+        # route listing satisfies neither.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        wp_json_root = (
+            '{"name":"Acme Industrial","description":"Precision components",'
+            '"url":"http:\\/\\/host","home":"http:\\/\\/host","gmt_offset":"0",'
+            '"namespaces":["oembed\\/1.0","wp\\/v2","contact-form-7\\/v1"],'
+            '"routes":{"\\/wp\\/v2\\/users":{"args":{"context":{"type":"string"},'
+            '"email":{"type":"string","format":"email","required":false}}},'
+            '"\\/wp\\/v2\\/posts":{"args":{"author_email":{"type":"string"}}},'
+            '"\\/wp\\/v2\\/comments":{"args":{"author_email":{"type":"string"}}}}}'
+        )
+        obs = self._obs("obs-wpjson", "http://corp/wp-json/", 200, body=wp_json_root)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        # No FallbackHypothesis from this body — body starts with `{`,
+        # not `[{`, AND contains the namespaces marker.
+        user_dump_matches = [
+            r for r in result if r.detector == "info_disclosure:user_object_dump"
+        ]
+        assert user_dump_matches == [], (
+            f"user_object_dump fired on /wp-json/ namespace root: {user_dump_matches}"
+        )
+
+    def test_info_disclosure_user_object_dump_still_matches_real_user_array(
+        self,
+    ) -> None:
+        # Counterpart to the wp-json regression test: ensure the tightened
+        # detector still fires on an actual ``[{...}]`` of user records
+        # (the canonical /wp-json/wp/v2/users response shape).
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        wp_users = (
+            '[{"id":1,"name":"admin","slug":"admin","url":"http:\\/\\/host\\/admin",'
+            '"avatar_urls":{"24":"http:\\/\\/gravatar\\/abc"},"description":""},'
+            '{"id":2,"name":"editor1","slug":"editor1","url":"http:\\/\\/host\\/e1",'
+            '"avatar_urls":{"24":"http:\\/\\/gravatar\\/def"}}]'
+        )
+        obs = self._obs("obs-users", "http://corp/wp-json/wp/v2/users", 200, body=wp_users)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        user_dump_matches = [
+            r for r in result if r.detector == "info_disclosure:user_object_dump"
+        ]
+        assert len(user_dump_matches) == 1, (
+            f"user_object_dump should fire on real user array, got {result}"
+        )
+        assert user_dump_matches[0].severity_hint == "medium"
+
+    def test_info_disclosure_user_object_dump_rejects_array_of_primitives(
+        self,
+    ) -> None:
+        # ``[1, 2, 3]`` or ``["a", "b"]`` aren't user arrays. Defensive
+        # against the LLM's fallback flagging anything array-shaped that
+        # happens to have "email" elsewhere.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        body = '["foo","bar","baz"]   <!-- email mentioned twice for noise: email email -->'
+        obs = self._obs("obs-prim", "http://target/list", 200, body=body)
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        user_dump_matches = [
+            r for r in result if r.detector == "info_disclosure:user_object_dump"
+        ]
+        assert user_dump_matches == []
+
     def test_info_disclosure_does_not_match_html_form_password_field(self) -> None:
         # Regression: 2026-05-08 Anduril run promoted info_disclosure
         # HIGH on stock Okta SAML login HTML because the form contained

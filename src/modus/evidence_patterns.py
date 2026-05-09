@@ -465,6 +465,76 @@ _FORM_ATTR_PRECEDING_RE = re.compile(
 _USER_OBJECT_RE = re.compile(
     r'"(UserId|userId|user_id|email|username)"\s*:',
 )
+# Markers that prove a body is a REST API namespace/route listing rather
+# than a user-record dump. WordPress's ``/wp-json/`` root, for example,
+# returns a single object with ``"namespaces":[...]`` and ``"routes":{...}``
+# whose route schemas mention ``"email":{"type":"string",...}`` dozens of
+# times — enough to trip a naive email-count heuristic. The 2026-05-09
+# wp-lab calibration baseline caught the regression: ``/wp-json/`` flagged
+# as ``user_object_dump`` on both profiles. Now rejected explicitly.
+_REST_NAMESPACE_MARKERS: tuple[str, ...] = (
+    '"namespaces":[',
+    '"routes":{',
+)
+# Field names that distinguish an actual user record from a route schema
+# that happens to mention ``"email"``. A user record has a numeric id AND
+# at least one user-distinctive field (slug, avatar_urls, username,
+# display_name). Route schemas don't.
+_USER_RECORD_DISTINCTIVE_RE = re.compile(
+    r'"(?:slug|avatar_urls|username|display_name|nicename|UserId|comment)"\s*:'
+)
+_USER_RECORD_ID_RE = re.compile(r'"(?:id|ID|user_id|userId|UserId)"\s*:\s*\d+')
+# Wrapper-array markers — patterns like ``{"data":[{...}], "status":"ok"}``
+# (Juice Shop, Strapi, generic REST framings). These let the detector
+# fire on the canonical wrapped-array shape without losing precision.
+_USER_ARRAY_WRAPPER_MARKERS: tuple[str, ...] = (
+    '"data":[{',
+    '"users":[{',
+    '"items":[{',
+    '"results":[{',
+)
+
+
+def _looks_like_user_array(body: str) -> bool:
+    """Stricter shape check for the ``user_object_dump`` detector.
+
+    Returns True only when the body is plausibly an array of user
+    records — not a REST-namespace listing that happens to mention
+    ``"email"`` in route schemas.
+
+    Two recognised shapes:
+
+    * **Raw array**: body strips to start with ``[{``. The canonical
+      response from ``/wp-json/wp/v2/users`` and similar.
+    * **Wrapped array**: body strips to start with ``{`` AND contains
+      one of ``"data":[{``, ``"users":[{``, ``"items":[{``,
+      ``"results":[{``. Common shape from frameworks that wrap list
+      responses (Juice Shop's ``{"status":"success","data":[...]}``,
+      Strapi's ``{"data":[{...}]}``).
+
+    Both shapes additionally require:
+      * No REST-namespace marker (``"namespaces":[`` or ``"routes":{``)
+        in the leading ~1KB. This rejects WordPress's ``/wp-json/`` root.
+      * The first ~4KB contains a numeric id field AND a user-distinctive
+        field (``slug``, ``avatar_urls``, ``username``, ``display_name``,
+        ``nicename``, ``UserId``).
+
+    The 4KB head covers a moderately-rich user record without scanning
+    megabytes of unrelated payload.
+    """
+    stripped = body.lstrip()
+    if any(marker in stripped[:1024] for marker in _REST_NAMESPACE_MARKERS):
+        return False
+    is_raw_array = stripped.startswith("[{")
+    is_wrapped_array = stripped.startswith("{") and any(
+        wrapper in stripped[:1024] for wrapper in _USER_ARRAY_WRAPPER_MARKERS
+    )
+    if not (is_raw_array or is_wrapped_array):
+        return False
+    head = stripped[:4096]
+    if not _USER_RECORD_ID_RE.search(head):
+        return False
+    return bool(_USER_RECORD_DISTINCTIVE_RE.search(head))
 _SQL_PAYLOAD_RE = re.compile(
     r"(\bUNION\s+SELECT\b|'\s*OR\s+1\s*=\s*1|--\s*$|'\)\)|"
     r"\bSELECT\s+\*\s+FROM\b|\bDROP\s+TABLE\b)",
@@ -763,11 +833,7 @@ def _detect_info_disclosure(
                 )
             )
             continue
-        if (
-            _USER_OBJECT_RE.search(body)
-            and "[" in body
-            and body.count('"UserId"') + body.count('"userId"') + body.count('"email"') >= 2
-        ):
+        if _looks_like_user_array(body):
             out.append(
                 FallbackHypothesis(
                     bug_class="info_disclosure",
