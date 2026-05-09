@@ -535,6 +535,8 @@ def _looks_like_user_array(body: str) -> bool:
     if not _USER_RECORD_ID_RE.search(head):
         return False
     return bool(_USER_RECORD_DISTINCTIVE_RE.search(head))
+
+
 _SQL_PAYLOAD_RE = re.compile(
     r"(\bUNION\s+SELECT\b|'\s*OR\s+1\s*=\s*1|--\s*$|'\)\)|"
     r"\bSELECT\s+\*\s+FROM\b|\bDROP\s+TABLE\b)",

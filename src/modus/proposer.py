@@ -785,9 +785,7 @@ class ReconAugmentedProposer:
             else self.DEFAULT_MISCONFIG_PER_STEP
         )
         self._plugin_per_step = (
-            plugin_per_step
-            if plugin_per_step is not None
-            else self.DEFAULT_PLUGIN_PER_STEP
+            plugin_per_step if plugin_per_step is not None else self.DEFAULT_PLUGIN_PER_STEP
         )
 
     async def propose(self, context: StepContext) -> list[Action]:

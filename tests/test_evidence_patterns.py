@@ -271,9 +271,7 @@ class TestDetectEvidencePatterns:
         result = detect_evidence_patterns([obs], ("info_disclosure",))
         # No FallbackHypothesis from this body — body starts with `{`,
         # not `[{`, AND contains the namespaces marker.
-        user_dump_matches = [
-            r for r in result if r.detector == "info_disclosure:user_object_dump"
-        ]
+        user_dump_matches = [r for r in result if r.detector == "info_disclosure:user_object_dump"]
         assert user_dump_matches == [], (
             f"user_object_dump fired on /wp-json/ namespace root: {user_dump_matches}"
         )
@@ -294,9 +292,7 @@ class TestDetectEvidencePatterns:
         )
         obs = self._obs("obs-users", "http://corp/wp-json/wp/v2/users", 200, body=wp_users)
         result = detect_evidence_patterns([obs], ("info_disclosure",))
-        user_dump_matches = [
-            r for r in result if r.detector == "info_disclosure:user_object_dump"
-        ]
+        user_dump_matches = [r for r in result if r.detector == "info_disclosure:user_object_dump"]
         assert len(user_dump_matches) == 1, (
             f"user_object_dump should fire on real user array, got {result}"
         )
@@ -313,9 +309,7 @@ class TestDetectEvidencePatterns:
         body = '["foo","bar","baz"]   <!-- email mentioned twice for noise: email email -->'
         obs = self._obs("obs-prim", "http://target/list", 200, body=body)
         result = detect_evidence_patterns([obs], ("info_disclosure",))
-        user_dump_matches = [
-            r for r in result if r.detector == "info_disclosure:user_object_dump"
-        ]
+        user_dump_matches = [r for r in result if r.detector == "info_disclosure:user_object_dump"]
         assert user_dump_matches == []
 
     def test_info_disclosure_does_not_match_html_form_password_field(self) -> None:

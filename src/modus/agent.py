@@ -622,10 +622,7 @@ class AgentLoop:
             # the LLM hypothesized info_disclosure on [obs-A, obs-B] and
             # the fallback then re-fired info_disclosure on [obs-A] with
             # a different ``synthesized_keys`` string. Now blocked.
-            if all(
-                (m.bug_class, ref) in hypothesized_pairs
-                for ref in m.evidence_refs
-            ):
+            if all((m.bug_class, ref) in hypothesized_pairs for ref in m.evidence_refs):
                 continue
             synthesized_keys.add(key)
             for ref in m.evidence_refs:

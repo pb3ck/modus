@@ -160,7 +160,7 @@ _WP_FINGERPRINT_MARKERS: tuple[str, ...] = (
     "/wp-json/",
     "wp-emoji-release",
     "WordPress.org",
-    "<meta name=\"generator\" content=\"WordPress",
+    '<meta name="generator" content="WordPress',
 )
 # Response-header tokens that prove a WP backend.
 _WP_HEADER_MARKERS: tuple[str, ...] = (

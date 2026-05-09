@@ -135,14 +135,14 @@ class TestLooksLikeWordpress:
     def test_wp_content_path_in_excerpt_fires(self) -> None:
         history = (
             "step 0: request GET http://foo/ status=200 body_excerpt='"
-            "<link rel=\"stylesheet\" href=\"/wp-content/themes/astra/style.css\"'",
+            '<link rel="stylesheet" href="/wp-content/themes/astra/style.css"\'',
         )
         assert looks_like_wordpress(history) is True
 
     def test_wp_json_path_in_excerpt_fires(self) -> None:
         history = (
             "step 0: request GET http://foo/ status=200 body_excerpt='"
-            "<link rel=\"https://api.w.org/\" href=\"/wp-json/\" />'",
+            '<link rel="https://api.w.org/" href="/wp-json/" />\'',
         )
         assert looks_like_wordpress(history) is True
 
@@ -169,9 +169,7 @@ class TestLooksLikeWordpress:
 class TestBuildMisconfigProposals:
     def test_emits_request_per_path_per_endpoint(self) -> None:
         scope = _scope("foo.example.com")
-        history = (
-            "step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",
-        )
+        history = ("step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",)
         proposals = build_misconfig_proposals(scope, history)
         # 1 host x 1 endpoint x len(WP_MISCONFIG_PATHS) paths
         assert len(proposals) == len(WP_MISCONFIG_PATHS)
@@ -218,9 +216,7 @@ class TestBuildMisconfigProposals:
 class TestBuildWpPluginProposals:
     def test_empty_when_no_wp_signal(self) -> None:
         scope = _scope("foo.example.com")
-        history = (
-            "step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",
-        )
+        history = ("step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",)
         proposals = build_wp_plugin_proposals(scope, history)
         assert proposals == []
 
@@ -308,15 +304,15 @@ class TestReconAugmentedProposer:
     @pytest.mark.asyncio
     async def test_no_wp_signal_skips_plugin_proposals(self) -> None:
         scope = _scope("foo.example.com")
-        history = (
-            "step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",
-        )
+        history = ("step 0: request GET http://foo.example.com:8080/ status=301 body_len=0",)
         inner = FixedProposer([])
         wrapped = ReconAugmentedProposer(inner, scope=scope)
         ctx = _ctx(scope, history)
         result = await wrapped.propose(ctx)
         # Misconfig paths still appear (capped at 4); plugin readme paths don't.
-        plugin_paths = [a for a in result if isinstance(a, Request) and "/wp-content/plugins/" in a.path]
+        plugin_paths = [
+            a for a in result if isinstance(a, Request) and "/wp-content/plugins/" in a.path
+        ]
         assert plugin_paths == []
         misconfig_paths = [a for a in result if isinstance(a, Request)]
         # /.git/config is highest-priority — should be in the first 4.

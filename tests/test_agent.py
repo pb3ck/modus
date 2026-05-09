@@ -500,9 +500,7 @@ class TestFallbackProposer:
             severity_hint="low",
         )
         # Pad with probes so subsequent steps still tick.
-        proposer = FixedProposer(
-            [llm_hypothesis] + [Probe(target="target.example.com")] * 20
-        )
+        proposer = FixedProposer([llm_hypothesis] + [Probe(target="target.example.com")] * 20)
         executor = _RecordingExecutor()
         loop = AgentLoop(
             proposer=proposer,
@@ -522,9 +520,7 @@ class TestFallbackProposer:
             f"fallback duplicated LLM's hypothesize on the same observation; "
             f"hypothesizes executed: {hypothesizes}"
         )
-        assert hypothesizes[0] is llm_hypothesis or hypothesizes[0].evidence_refs == (
-            seed_id,
-        )
+        assert hypothesizes[0] is llm_hypothesis or hypothesizes[0].evidence_refs == (seed_id,)
 
     async def test_seed_from_corpus_loads_response_artifacts(self) -> None:
         """When ``seed_from_corpus=True`` (the default), the loop
