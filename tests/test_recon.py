@@ -248,28 +248,53 @@ class TestBuildWpPluginProposals:
 
 class TestReconAugmentedProposer:
     @pytest.mark.asyncio
-    async def test_appends_scout_after_inner_proposals(self) -> None:
+    async def test_prepends_scout_before_inner_proposals(self) -> None:
+        # The 2026-05-09 wp-lab baseline showed: appended scout
+        # proposals never won the "first novel survivor" race against
+        # LLM creative paths — plugin readme.txt requests fired every
+        # step but never actually executed. Prepending scout fixes that:
+        # the curated list drains in priority order across steps.
         scope = _scope("foo.example.com")
         history = (
             "step 0: request GET http://foo.example.com:8080/ status=200 "
             "body_excerpt='/wp-content/themes/x/style.css'",
         )
-        # Inner proposer always returns one Probe. Test that scout
-        # proposals are appended (not prepended), so LLM keeps primacy.
         inner_action = Probe(target="foo.example.com", aspect="httpx")
         inner = FixedProposer([inner_action])
         wrapped = ReconAugmentedProposer(inner, scope=scope)
         ctx = _ctx(scope, history)
         result = await wrapped.propose(ctx)
-        assert result[0] == inner_action
-        # Tail is scout (mix of misconfig + WP plugin proposals).
-        scout = result[1:]
+        # Inner action sits at the tail, after both scout buckets.
+        assert result[-1] == inner_action
+        # Head is scout (misconfig first, then WP plugin probes).
+        scout = result[:-1]
         assert all(isinstance(a, Request) for a in scout)
-        # Should include both categories.
         misconfig_paths = {a.path for a in scout if not a.path.startswith("/wp-content/plugins/")}
         plugin_paths = {a.path for a in scout if a.path.startswith("/wp-content/plugins/")}
-        assert "/wp-config.php.bak" in misconfig_paths
-        assert any(p.endswith("/readme.txt") for p in plugin_paths)
+        # Both buckets appear within their per-step caps.
+        assert misconfig_paths
+        assert plugin_paths
+        # The very first proposal is the highest-priority misconfig path:
+        # ``/.git/config`` (curated as the highest-impact VCS exposure).
+        assert isinstance(result[0], Request)
+        assert result[0].path == "/.git/config"
+
+    @pytest.mark.asyncio
+    async def test_per_step_caps_keep_llm_room(self) -> None:
+        # Default caps are 4 misconfig + 4 plugin = 8 prepended scout
+        # proposals max. With 30 misconfig paths and 30 slugs available,
+        # it's important that scout doesn't crowd out the LLM batch.
+        scope = _scope("foo.example.com")
+        history = (
+            "step 0: request GET http://foo.example.com:8080/ status=200 "
+            "body_excerpt='/wp-content/themes/x/style.css'",
+        )
+        inner = FixedProposer([])
+        wrapped = ReconAugmentedProposer(inner, scope=scope)
+        ctx = _ctx(scope, history)
+        result = await wrapped.propose(ctx)
+        # Default cap: 4 misconfig + 4 plugin = 8 max scout actions.
+        assert len(result) == 8
 
     @pytest.mark.asyncio
     async def test_no_wp_signal_skips_plugin_proposals(self) -> None:
@@ -281,8 +306,25 @@ class TestReconAugmentedProposer:
         wrapped = ReconAugmentedProposer(inner, scope=scope)
         ctx = _ctx(scope, history)
         result = await wrapped.propose(ctx)
-        # Misconfig paths still appear; plugin readme paths don't.
+        # Misconfig paths still appear (capped at 4); plugin readme paths don't.
         plugin_paths = [a for a in result if isinstance(a, Request) and "/wp-content/plugins/" in a.path]
         assert plugin_paths == []
         misconfig_paths = [a for a in result if isinstance(a, Request)]
+        # /.git/config is highest-priority — should be in the first 4.
         assert any(a.path == "/.git/config" for a in misconfig_paths)
+        assert len(misconfig_paths) == 4  # cap
+
+    @pytest.mark.asyncio
+    async def test_explicit_caps(self) -> None:
+        scope = _scope("foo.example.com")
+        inner = FixedProposer([])
+        wrapped = ReconAugmentedProposer(
+            inner,
+            scope=scope,
+            misconfig_per_step=2,
+            plugin_per_step=0,
+        )
+        ctx = _ctx(scope, ())
+        result = await wrapped.propose(ctx)
+        assert len(result) == 2
+        assert all(isinstance(a, Request) for a in result)

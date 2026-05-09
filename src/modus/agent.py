@@ -232,6 +232,19 @@ class AgentLoop:
         # only fires once per run — re-emitting the same fallback
         # would just be re-rejected as a duplicate downstream.
         synthesized_keys: set[str] = set()
+        # ``(bug_class, observation_id)`` pairs that have been covered
+        # by ANY hypothesize action this run — both LLM-emitted and
+        # fallback-emitted. The fallback proposer suppresses a candidate
+        # whose evidence_refs are *fully* covered (every ref already in
+        # this set for the same bug_class), preventing duplicate
+        # candidates that name the same observation. The 2026-05-09
+        # wp-lab calibration baseline caught the gap: the LLM hypothesized
+        # ``info_disclosure`` on ``[user-enum-obs, readme-obs]`` and the
+        # fallback then re-fired ``info_disclosure`` on ``[user-enum-obs]``.
+        # Different ``synthesized_keys`` strings, both passed dedup, the
+        # operator got a duplicate candidate to triage. Tracking
+        # (bug_class, ref) pairs across LLM+fallback closes the gap.
+        hypothesized_pairs: set[tuple[str, str]] = set()
         # ``(candidate_id, severity_hint)`` of hypothesizes whose
         # severity meets the auto-promotion threshold (medium /
         # high / critical) and that have NOT yet been promoted via
@@ -278,6 +291,7 @@ class AgentLoop:
                 pending_promotions=pending_promotions,
                 synthesized_promotion_ids=synthesized_promotion_ids,
                 run_observation_ids=frozenset(run_observations),
+                hypothesized_pairs=hypothesized_pairs,
             )
             # Prepend fallbacks so they win the "first novel survivor"
             # ranking when both fire — the fallback only emits when the
@@ -358,6 +372,15 @@ class AgentLoop:
                 # productively closing the loop on its own.
                 if chosen.kind == "hypothesize":
                     hypothesize_steps_so_far.append(step_index)
+                    # Track every (bug_class, evidence_ref) pair this
+                    # candidate covers, so the fallback proposer
+                    # suppresses overlapping hypotheses on the same
+                    # observation. Both LLM and fallback hypotheses
+                    # write here — the fallback's own check happens
+                    # before this update, so the fallback can't
+                    # accidentally suppress its own emissions.
+                    for ref in getattr(chosen, "evidence_refs", ()):
+                        hypothesized_pairs.add((chosen.bug_class, ref))
                     severity = result.get("severity_hint")
                     if (
                         isinstance(severity, str)
@@ -522,6 +545,7 @@ class AgentLoop:
         pending_promotions: list[tuple[str, str]],
         synthesized_promotion_ids: set[str],
         run_observation_ids: frozenset[str],
+        hypothesized_pairs: set[tuple[str, str]],
     ) -> list[Action]:
         """Synthesize fallback proposals when the LLM keeps abdicating.
 
@@ -592,7 +616,20 @@ class AgentLoop:
             key = f"{m.bug_class}:{','.join(sorted(m.evidence_refs))}"
             if key in synthesized_keys:
                 continue
+            # Suppress when every observation this fallback would cite
+            # is already in a prior hypothesize for the same bug_class.
+            # Closes the dedup gap from the 2026-05-09 wp-lab baseline:
+            # the LLM hypothesized info_disclosure on [obs-A, obs-B] and
+            # the fallback then re-fired info_disclosure on [obs-A] with
+            # a different ``synthesized_keys`` string. Now blocked.
+            if all(
+                (m.bug_class, ref) in hypothesized_pairs
+                for ref in m.evidence_refs
+            ):
+                continue
             synthesized_keys.add(key)
+            for ref in m.evidence_refs:
+                hypothesized_pairs.add((m.bug_class, ref))
             try:
                 action = Hypothesize(
                     bug_class=m.bug_class,

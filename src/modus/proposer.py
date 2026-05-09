@@ -733,34 +733,74 @@ class ClaudeCliProposer(_LlmProposerBase):
 class ReconAugmentedProposer:
     """Wraps another :class:`Proposer` with a deterministic recon floor.
 
-    The wrapped proposer's batch is returned first — the LLM still leads
-    creative path choice. Appended after it: high-signal misconfig probes
-    (``/.git/config``, ``/wp-config.php.bak``, ``/wp-content/debug.log``,
-    etc.) and, once a WordPress signal is detected, plugin-readme
-    fingerprint probes for ~30 popular plugin slugs.
+    Two scout buckets prepended to the inner proposer's batch each
+    step (capped — LLM creativity stays in the mix):
 
-    The agent loop's "first novel survivor" ranker means LLM proposals
-    win when they're novel; the scout fills the gap when LLM proposals
-    duplicate prior actions. Net effect: the LLM keeps primacy on
-    creative paths, but the long-tail of well-known misconfig and
-    plugin-fingerprint paths is guaranteed to land within the budget.
+    * **Misconfig probes** — ``/.git/config``, ``/wp-config.php.bak``,
+      ``/wp-content/debug.log`` and ~25 other high-signal paths on each
+      in-scope endpoint, drained in curated priority order across steps.
+    * **WordPress plugin fingerprints** — once a WordPress marker
+      appears in history, ``/wp-content/plugins/<slug>/readme.txt`` for
+      ~30 popular slugs gets prepended too.
 
-    Disable per-session by setting ``recon_floor=False`` on construction
-    if the operator wants pure LLM-driven recon (e.g. for ablation
-    measurement against the calibration lab).
+    Why prepend (not append): the agent loop's "first novel survivor"
+    ranker means appended proposals only execute when the LLM's batch
+    is fully duplicated. The 2026-05-09 wp-lab calibration baseline
+    showed this gap empirically — appended scout proposals never landed
+    a single ``/wp-content/plugins/<slug>/readme.txt`` despite firing
+    every step. Prepending puts the curated list ahead of LLM creative
+    paths, so each step the highest-priority unprobed scout path wins.
+
+    Why a cap (``misconfig_per_step`` / ``plugin_per_step``): with no
+    cap, scout would emit hundreds of proposals per step and crowd out
+    the LLM batch entirely. With a small cap (4 each), only the top-N
+    unprobed scout paths land in the proposal batch — the rest of the
+    curated list waits for next step. The LLM's full ``sample_count``
+    follows after, keeping creative slots available when scout's
+    proposals all duplicate (or when scout has nothing to say).
+
+    Disable per-session via ``recon_floor=False`` in :func:`make_proposer`
+    if the operator wants pure LLM-driven recon (e.g. ablation tests).
     """
 
-    def __init__(self, inner: Proposer, *, scope: ScopePolicy) -> None:
+    # Per-step caps. 4 each → at most 8 prepended scout proposals,
+    # which leaves at least 8 ``sample_count`` LLM slots before
+    # consistency pruning. The cap is what keeps the LLM in the game.
+    DEFAULT_MISCONFIG_PER_STEP: int = 4
+    DEFAULT_PLUGIN_PER_STEP: int = 4
+
+    def __init__(
+        self,
+        inner: Proposer,
+        *,
+        scope: ScopePolicy,
+        misconfig_per_step: int | None = None,
+        plugin_per_step: int | None = None,
+    ) -> None:
         self._inner = inner
         self._scope = scope
+        self._misconfig_per_step = (
+            misconfig_per_step
+            if misconfig_per_step is not None
+            else self.DEFAULT_MISCONFIG_PER_STEP
+        )
+        self._plugin_per_step = (
+            plugin_per_step
+            if plugin_per_step is not None
+            else self.DEFAULT_PLUGIN_PER_STEP
+        )
 
     async def propose(self, context: StepContext) -> list[Action]:
         proposals = await self._inner.propose(context)
-        scout: list[Action] = []
-        scout.extend(build_misconfig_proposals(self._scope, context.recent_history))
-        scout.extend(build_wp_plugin_proposals(self._scope, context.recent_history))
-        # Append: LLM-led, scout fills gaps.
-        return [*proposals, *scout]
+        misconfig = build_misconfig_proposals(
+            self._scope, context.recent_history, limit=self._misconfig_per_step
+        )
+        plugin = build_wp_plugin_proposals(
+            self._scope, context.recent_history, limit=self._plugin_per_step
+        )
+        # Prepend: scout's top-K candidates win the "first novel
+        # survivor" race, draining the curated list across steps.
+        return [*misconfig, *plugin, *proposals]
 
 
 def make_proposer(

@@ -174,14 +174,22 @@ def discover_endpoints(
 ) -> tuple[tuple[str, int, bool], ...]:
     """Return concrete ``(host, port, tls)`` triples to probe.
 
-    Mirroring rule: if history contains observations on ``(host, port, tls)``,
-    use exactly those triples — the LLM has already established the right
-    transport. If no history exists yet (step 0), fall back to scope's
-    parsed endpoints, defaulting port=None entries to ``(80, False)``.
+    Per-host mirroring: each scope host gets at least one triple in the
+    output. If the host has appeared in history, all of its observed
+    ``(port, tls)`` triples are returned (the LLM has already established
+    the right transports). If the host hasn't appeared in history yet —
+    common in early steps before the LLM has discovered every host — the
+    scope's parsed endpoint is used (defaulting port=None / tls=None to
+    ``(80, False)``).
 
-    Returns at most one triple per (host, port, tls) tuple, deduplicated.
+    The 2026-05-09 wp-lab calibration baseline regression caught an
+    earlier bug here: the all-or-nothing rule meant once any host
+    appeared in history, every host without history was excluded from
+    the scout. Concretely, woo-shop got zero scout coverage for steps
+    1-3 because corp-marketing had been probed first. Per-host fallback
+    fixes that.
     """
-    seen: set[tuple[str, int, bool]] = set()
+    seen_per_host: dict[str, set[tuple[int, bool]]] = {}
     scope_hosts = {ep.host for ep in scope.endpoints()}
     for line in recent_history:
         for match in _HISTORY_URL_RE.finditer(line):
@@ -191,17 +199,21 @@ def discover_endpoints(
             port_s = match.group("port")
             tls = match.group("scheme") == "https"
             port = int(port_s) if port_s else (443 if tls else 80)
-            seen.add((host, port, tls))
-    if seen:
-        return tuple(sorted(seen))
-    # Step-0 fallback: derive from scope. Port-explicit endpoints are
-    # used as-is; bare-hostname endpoints default to plain HTTP on 80.
-    out: list[tuple[str, int, bool]] = []
+            seen_per_host.setdefault(host, set()).add((port, tls))
+
+    out: set[tuple[str, int, bool]] = set()
     for ep in scope.endpoints():
-        port = ep.port if ep.port is not None else 80
-        tls = ep.tls if ep.tls is not None else False
-        out.append((ep.host, port, tls))
-    return tuple(sorted(set(out)))
+        host = ep.host
+        if host in seen_per_host:
+            # Mirror the (port, tls) triples actually probed for this host.
+            for port, tls in seen_per_host[host]:
+                out.add((host, port, tls))
+        else:
+            # Scope-derived fallback for hosts not yet in history.
+            port = ep.port if ep.port is not None else 80
+            tls = ep.tls if ep.tls is not None else False
+            out.add((host, port, tls))
+    return tuple(sorted(out))
 
 
 def looks_like_wordpress(recent_history: tuple[str, ...]) -> bool:
@@ -261,14 +273,27 @@ def build_misconfig_proposals(
     recent_history: tuple[str, ...],
     *,
     paths: tuple[str, ...] = WP_MISCONFIG_PATHS,
+    limit: int | None = None,
 ) -> list[Action]:
     """Emit ``Request`` actions for high-signal misconfig paths on each
-    in-scope endpoint, skipping any path already executed this session."""
+    in-scope endpoint, skipping any path already executed this session.
+
+    ``limit`` caps the returned batch size. Caller (the recon-augmented
+    proposer) sets a small cap (e.g. 4) per step so the scout doesn't
+    crowd out LLM creativity in the proposer batch — only the top-N
+    unprobed paths in curated priority order are emitted. Each step's
+    "first novel survivor" then drains the curated list across steps.
+    ``None`` means no cap (used by tests and for diagnostic dumps).
+    """
     executed = _executed_action_keys(recent_history)
     out: list[Action] = []
-    for host, port, tls in discover_endpoints(scope, recent_history):
-        scheme = "https" if tls else "http"
-        for path in paths:
+    # Outer loop is paths so that the scout drains highest-priority
+    # paths across all hosts before moving to the next path. Mixing in
+    # round-robin host order would bury the per-host coverage of e.g.
+    # `/.git/config` behind 30 lower-priority paths on the first host.
+    for path in paths:
+        for host, port, tls in discover_endpoints(scope, recent_history):
+            scheme = "https" if tls else "http"
             key = f"request:GET:{scheme}://{host}:{port}{path}"
             if key in executed:
                 continue
@@ -281,6 +306,8 @@ def build_misconfig_proposals(
                     tls=tls,
                 )
             )
+            if limit is not None and len(out) >= limit:
+                return out
     return out
 
 
@@ -289,17 +316,24 @@ def build_wp_plugin_proposals(
     recent_history: tuple[str, ...],
     *,
     slugs: tuple[str, ...] = WP_POPULAR_PLUGIN_SLUGS,
+    limit: int | None = None,
 ) -> list[Action]:
     """Emit ``Request`` actions for plugin-readme fingerprinting once a
     WordPress signal is detected. Empty list if no WP signal yet — saves
-    the step budget on non-WP targets without operator opt-in."""
+    the step budget on non-WP targets without operator opt-in.
+
+    ``limit`` caps the returned batch size. Same rationale as
+    :func:`build_misconfig_proposals` — small per-step caps preserve
+    LLM creativity slots while letting the curated list drain across
+    steps in priority order.
+    """
     if not looks_like_wordpress(recent_history):
         return []
     executed = _executed_action_keys(recent_history)
     out: list[Action] = []
-    for host, port, tls in discover_endpoints(scope, recent_history):
-        scheme = "https" if tls else "http"
-        for slug in slugs:
+    for slug in slugs:
+        for host, port, tls in discover_endpoints(scope, recent_history):
+            scheme = "https" if tls else "http"
             path = f"/wp-content/plugins/{slug}/readme.txt"
             key = f"request:GET:{scheme}://{host}:{port}{path}"
             if key in executed:
@@ -313,6 +347,8 @@ def build_wp_plugin_proposals(
                     tls=tls,
                 )
             )
+            if limit is not None and len(out) >= limit:
+                return out
     return out
 
 

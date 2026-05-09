@@ -448,6 +448,84 @@ class TestFallbackProposer:
                 f"a hypothesize emitted in a later run; evidence_refs={hyp.evidence_refs}"
             )
 
+    async def test_fallback_suppresses_when_llm_already_covered_observation(
+        self,
+    ) -> None:
+        """Regression: the fallback proposer must not re-hypothesize
+        against an observation the LLM already cited.
+
+        The 2026-05-09 wp-lab calibration baseline caught the gap.
+        The LLM emitted a multi-ref hypothesize on
+        ``[user-enum-obs, readme-obs]`` for ``info_disclosure``; the
+        fallback then re-fired ``info_disclosure`` on
+        ``[user-enum-obs]``. ``synthesized_keys`` only saw the
+        fallback's own emissions, so its dedup was string-equality on
+        ``"info_disclosure:user-enum-obs,readme-obs"`` vs
+        ``"info_disclosure:user-enum-obs"`` — different keys, both
+        passed. The operator got two candidates citing the same
+        observation. Cross-source ``hypothesized_pairs`` tracking now
+        suppresses the duplicate.
+        """
+        from modus.session import SessionObservation
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        seed_id = "obs-shared-version"
+        session.observations.append(
+            SessionObservation(
+                id=seed_id,
+                kind="request",
+                payload={
+                    "url": "http://target.example.com/api/version",
+                    "status": 200,
+                    "response_body": '{"version":"1.2.3"}',
+                    "request_headers": {},
+                },
+            )
+        )
+
+        # The LLM emits a Hypothesize against the seeded observation
+        # on the very first step. After that it returns Probes only.
+        # The fallback fires from FALLBACK_AFTER_STEP=5 onwards; if
+        # the cross-source dedup works, it must NOT re-hypothesize
+        # against the same observation.
+        llm_hypothesis = Hypothesize(
+            bug_class="info_disclosure",
+            evidence_refs=(seed_id,),
+            rationale="LLM-emitted on step 0 against the seeded version observation.",
+            severity_hint="low",
+        )
+        # Pad with probes so subsequent steps still tick.
+        proposer = FixedProposer(
+            [llm_hypothesis] + [Probe(target="target.example.com")] * 20
+        )
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=8, max_consecutive_empty_steps=10),
+        )
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            initial_observation_ids=frozenset({seed_id}),
+        )
+        hypothesizes = [a for a in executor.calls if a.kind == "hypothesize"]
+        # Exactly one — the LLM's. The fallback must not duplicate it.
+        assert len(hypothesizes) == 1, (
+            f"fallback duplicated LLM's hypothesize on the same observation; "
+            f"hypothesizes executed: {hypothesizes}"
+        )
+        assert hypothesizes[0] is llm_hypothesis or hypothesizes[0].evidence_refs == (
+            seed_id,
+        )
+
     async def test_seed_from_corpus_loads_response_artifacts(self) -> None:
         """When ``seed_from_corpus=True`` (the default), the loop
         calls ``list_response_artifacts`` on session.with_quarry()
