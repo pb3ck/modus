@@ -53,6 +53,7 @@ from pydantic import TypeAdapter, ValidationError
 from modus.actions import Action
 from modus.recon import (
     build_misconfig_proposals,
+    build_weak_credential_proposals,
     build_wp_plugin_proposals,
     build_xmlrpc_followup_proposals,
 )
@@ -802,9 +803,9 @@ class ReconAugmentedProposer:
         # (rather than parity-based scheduling). These are tightly
         # gated so they don't crowd the LLM batch — only fire when a
         # specific recon result calls for them.
-        followups: list[Action] = list(
-            build_xmlrpc_followup_proposals(self._scope, context.recent_history)
-        )
+        followups: list[Action] = []
+        followups.extend(build_xmlrpc_followup_proposals(self._scope, context.recent_history))
+        followups.extend(build_weak_credential_proposals(self._scope, context.recent_history))
 
         # Two-level interleave:
         #

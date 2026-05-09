@@ -393,6 +393,90 @@ def build_xmlrpc_followup_proposals(
     return out
 
 
+# Weak-credential probe (issue #35). When ``GET /wp-login.php`` returned
+# a recognisable WordPress login form, queue a ``POST`` with a single
+# high-probability weak credential. Single attempt per host because the
+# agent loop's dedup key for ``Request`` actions is identity-only
+# (method + URL) — body variation isn't reflected, so multi-cred
+# rotation needs a different mechanism (deferred to follow-on work
+# referenced in issue #35's success criterion).
+_WP_LOGIN_PATH_RE = re.compile(r"/wp-login\.php\b", re.IGNORECASE)
+_WP_LOGIN_GET_200_RE = re.compile(
+    r"\bGET\s+(?P<scheme>https?)://(?P<host>[\w.\-]+)(?::(?P<port>\d+))?/wp-login\.php\b[^\n]*\bstatus=200\b",
+    re.IGNORECASE,
+)
+# Single curated probe — ``admin/admin123`` is the wp-lab seed AND a
+# recognised top-tier weak-password for WordPress installs (appears in
+# multiple published common-password datasets). Multi-cred rotation is
+# a follow-on once the agent loop's dedup respects body diff.
+_WEAK_CRED_USERNAME = "admin"
+_WEAK_CRED_PASSWORD = "admin123"
+_WEAK_CRED_BODY = (
+    f"log={_WEAK_CRED_USERNAME}&pwd={_WEAK_CRED_PASSWORD}"
+    "&wp-submit=Log+In&testcookie=1&redirect_to="
+)
+
+
+def build_weak_credential_proposals(
+    scope: ScopePolicy,
+    recent_history: tuple[str, ...],
+) -> list[Action]:
+    """Emit ``POST /wp-login.php`` with a single curated weak credential
+    when a prior ``GET /wp-login.php`` returned 200 on the same host.
+    Issue #35.
+
+    The probe is deliberately conservative — one credential per host
+    (``admin/admin123``). The ``weak_credential_login_success`` evidence
+    detector picks up the success signal (302 to ``/wp-admin/`` or final
+    URL containing ``/wp-admin/``).
+
+    The cookie header sets ``wordpress_test_cookie`` to bypass WP's
+    "cookies blocked" pre-check; without it the form rejects the POST
+    before validating credentials.
+    """
+    if "POST" not in scope.allowed_methods:
+        return []
+    seen_form: dict[tuple[str, int, bool], None] = {}
+    seen_post: set[str] = set()
+    for line in recent_history:
+        match = _WP_LOGIN_GET_200_RE.search(line)
+        if match:
+            host = match.group("host")
+            tls = match.group("scheme") == "https"
+            port_s = match.group("port")
+            port = int(port_s) if port_s else (443 if tls else 80)
+            seen_form[(host, port, tls)] = None
+        if "POST " in line and "/wp-login.php" in line:
+            url_match = _HISTORY_URL_RE.search(line)
+            if url_match:
+                seen_post.add(
+                    f"{url_match.group('scheme')}://{url_match.group('host')}"
+                    f"{(':' + url_match.group('port')) if url_match.group('port') else ''}"
+                    "/wp-login.php"
+                )
+    out: list[Action] = []
+    for (host, port, tls), _ in seen_form.items():
+        scheme = "https" if tls else "http"
+        url_key = f"{scheme}://{host}:{port}/wp-login.php"
+        if url_key in seen_post:
+            continue
+        out.append(
+            Request(
+                target=host,
+                method="POST",
+                path="/wp-login.php",
+                port=port,
+                tls=tls,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": "wordpress_test_cookie=WP+Cookie+check",
+                },
+                body=_WEAK_CRED_BODY,
+            )
+        )
+    return out
+
+
 def build_wp_plugin_proposals(
     scope: ScopePolicy,
     recent_history: tuple[str, ...],
@@ -438,6 +522,7 @@ __all__ = [
     "WP_MISCONFIG_PATHS",
     "WP_POPULAR_PLUGIN_SLUGS",
     "build_misconfig_proposals",
+    "build_weak_credential_proposals",
     "build_wp_plugin_proposals",
     "build_xmlrpc_followup_proposals",
     "discover_endpoints",

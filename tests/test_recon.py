@@ -30,6 +30,7 @@ from modus.recon import (
     WP_MISCONFIG_PATHS,
     WP_POPULAR_PLUGIN_SLUGS,
     build_misconfig_proposals,
+    build_weak_credential_proposals,
     build_wp_plugin_proposals,
     build_xmlrpc_followup_proposals,
     discover_endpoints,
@@ -328,6 +329,74 @@ class TestXmlrpcFollowup:
         proposals = build_xmlrpc_followup_proposals(scope, history)
         targets = {p.target for p in proposals}
         assert targets == {"a.example.com", "b.example.com"}
+
+
+class TestWeakCredentialFollowup:
+    """Issue #35: when ``GET /wp-login.php`` returned 200 with the
+    login form, queue a single ``POST`` with a curated weak credential.
+    Single attempt per host (the agent's identity-only dedup key
+    doesn't differentiate by body)."""
+
+    def test_emits_post_when_get_returned_200(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/wp-login.php status=200 body_len=3000",
+        )
+        proposals = build_weak_credential_proposals(scope, history)
+        assert len(proposals) == 1
+        p = proposals[0]
+        assert isinstance(p, Request)
+        assert p.method == "POST"
+        assert p.path == "/wp-login.php"
+        # Body has the WP-form-shape with weak creds.
+        assert p.body is not None
+        assert "log=admin" in p.body
+        assert "pwd=admin123" in p.body
+        # Cookie header sets the test cookie so WP doesn't reject the
+        # POST as cookies-blocked.
+        assert "wordpress_test_cookie" in (p.headers or {}).get("Cookie", "")
+
+    def test_skips_when_post_already_executed(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/wp-login.php status=200 body_len=3000",
+            "step 1: request POST http://foo.example.com:8080/wp-login.php status=200 body_len=4000",
+        )
+        proposals = build_weak_credential_proposals(scope, history)
+        assert proposals == []
+
+    def test_silent_when_get_returned_404(self) -> None:
+        # No login form → no POST follow-up.
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET", "POST"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/wp-login.php status=404 body_len=10",
+        )
+        proposals = build_weak_credential_proposals(scope, history)
+        assert proposals == []
+
+    def test_silent_when_post_not_in_allowed_methods(self) -> None:
+        scope = ScopePolicy(
+            target_name="t",
+            allowed_assets=frozenset({"http://foo.example.com:8080"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        history = (
+            "step 0: request GET http://foo.example.com:8080/wp-login.php status=200 body_len=3000",
+        )
+        proposals = build_weak_credential_proposals(scope, history)
+        assert proposals == []
 
 
 class TestReconAugmentedProposer:

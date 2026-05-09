@@ -249,6 +249,30 @@ PATTERNS: dict[str, BugClassPattern] = {
             "chain."
         ),
     ),
+    "weak_credential": BugClassPattern(
+        bug_class="weak_credential",
+        recognition=(
+            "A `request` (typically POST against a login endpoint like "
+            "`/wp-login.php`, `/login`, `/admin/login`, `/api/v1/login`) "
+            "with a credential pair drawn from a small curated weak-set "
+            "(`admin/admin`, `admin/admin123`, `admin/password`, "
+            "`admin/wordpress`, etc.) that returns evidence of "
+            "successful authentication: a 302 to an admin path, a 200 "
+            "whose body contains admin-bar / dashboard markers, a "
+            "Set-Cookie carrying a session-shaped value, or a JWT in "
+            "the body. The win signal is *issued credentials with "
+            "privileges*, not just a 200 on the login form."
+        ),
+        severity_canonical="high",
+        severity_notes=(
+            "critical when the matched account is the literal admin / "
+            "root / superuser of the application; high for any other "
+            "privileged account (shop manager, editor) where the "
+            "credential is observably weak; medium when the weak "
+            "credential is on a low-privilege account but the login "
+            "still bypasses an auth boundary the operator cares about."
+        ),
+    ),
 }
 
 
@@ -704,6 +728,22 @@ def _request_headers(obs: SessionObservation) -> dict[str, str]:
     payload = obs.payload if isinstance(obs.payload, dict) else {}
     headers = payload.get("request_headers", {})
     return headers if isinstance(headers, dict) else {}
+
+
+def _request_method(obs: SessionObservation) -> str:
+    payload = obs.payload if isinstance(obs.payload, dict) else {}
+    value = payload.get("method")
+    return str(value).upper() if isinstance(value, str) else ""
+
+
+def _redirect_chain(obs: SessionObservation) -> list[str]:
+    payload = obs.payload if isinstance(obs.payload, dict) else {}
+    chain = payload.get("redirect_chain", [])
+    return [str(u) for u in chain] if isinstance(chain, list) else []
+
+
+def _request_body(obs: SessionObservation) -> str:
+    return _request_payload_field(obs, "request_body")
 
 
 def _is_authenticated_request(obs: SessionObservation) -> bool:
@@ -1444,11 +1484,86 @@ def _detect_sqli(
     return out
 
 
+def _detect_weak_credential(
+    observations: list[SessionObservation],
+) -> list[FallbackHypothesis]:
+    """Match successful WordPress login probes (issue #35).
+
+    Recognises a successful weak-credential login when:
+
+    * Original request method is ``POST`` to ``/wp-login.php``.
+    * Response status is 200 (the executor follows the 302 redirect).
+    * The redirect chain went through ``/wp-admin/`` OR the final
+      response body has WordPress dashboard markers (``wp-admin-bar``,
+      ``Howdy,``, ``wp-admin/admin.php``).
+
+    Failed logins return 200 with the login form again — no
+    ``/wp-admin/`` in the redirect chain. The check is one-sided so
+    false positives are minimised.
+    """
+    out: list[FallbackHypothesis] = []
+    for obs in observations:
+        if obs.kind != "request":
+            continue
+        if _request_method(obs) != "POST":
+            continue
+        url = _request_url(obs)
+        if "/wp-login.php" not in _path_only(url):
+            continue
+        if _request_status(obs) != 200:
+            continue
+        # Verify the request body shape — reject probes that POST
+        # something unrelated to WP login (some plugins POST to
+        # /wp-login.php for other reasons).
+        req_body = _request_body(obs)
+        if "log=" not in req_body or "pwd=" not in req_body:
+            continue
+        chain = _redirect_chain(obs)
+        body = _response_body(obs)
+        landed_on_admin = any("/wp-admin/" in u for u in chain) or (
+            "wp-admin-bar" in body or "Howdy," in body
+        )
+        if not landed_on_admin:
+            continue
+        # Extract the username we used so the rationale is concrete.
+        username_match = re.search(r"\blog=([^&]+)", req_body)
+        username = username_match.group(1) if username_match else "?"
+        out.append(
+            FallbackHypothesis(
+                bug_class="weak_credential",
+                severity_hint="high",
+                evidence_refs=(obs.id,),
+                rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
+                    bug_class="weak_credential",
+                    endpoint=_path_only(url),
+                    curl_target=url,
+                    obs_id=obs.id,
+                    status=200,
+                    evidence_excerpt=(
+                        f"WordPress weak-credential login succeeded for "
+                        f"username {username!r} via POST /wp-login.php — "
+                        f"the response chain landed at /wp-admin/ confirming "
+                        f"the login flow completed and a session was issued"
+                    ),
+                    impact_note=(
+                        "weak-credential admin login bypasses the auth "
+                        "boundary entirely; severity is high because the "
+                        "attacker gains the role tied to the matched user "
+                        "(typically administrator with full site control)"
+                    ),
+                ),
+                detector="weak_credential:wp_login_success",
+            )
+        )
+    return out
+
+
 _DETECTORS = {
     "info_disclosure": _detect_info_disclosure,
     "auth_bypass": _detect_auth_bypass,
     "idor": _detect_idor,
     "sqli": _detect_sqli,
+    "weak_credential": _detect_weak_credential,
 }
 
 

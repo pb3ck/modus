@@ -185,6 +185,10 @@ class TestDetectEvidencePatterns:
         status: int,
         body: str = "",
         request_headers: dict | None = None,
+        *,
+        method: str = "GET",
+        request_body: str = "",
+        redirect_chain: list[str] | None = None,
     ):
         from modus.session import SessionObservation
 
@@ -193,9 +197,12 @@ class TestDetectEvidencePatterns:
             kind="request",
             payload={
                 "url": url,
+                "method": method,
                 "status": status,
                 "response_body": body,
                 "request_headers": request_headers or {},
+                "request_body": request_body,
+                "redirect_chain": redirect_chain or [],
             },
         )
 
