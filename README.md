@@ -37,6 +37,57 @@ performed outside Modus.
 > releases until 1.0. v0.4.0 is the first non-pre-release tag —
 > alphas precede it back to 0.1.0a1.
 
+## Operating modes
+
+Modus has two operating positions, toggled via the `MODUS_MODE`
+environment variable (or the `mode` argument to `AgentLoop`).
+Both modes preserve scope enforcement, per-run observation
+isolation, the typed-action grammar, Z3 consistency preconditions,
+and the deterministic detector library — the toggle only adjusts
+**how much context the LLM sees and how much tool surface it can
+reach**, never the safety perimeter.
+
+### `free` — productive bug-hunting mode (default)
+
+The LLM gets larger response-body excerpts in history (4 KB head)
+so it can extract CSRF nonces, parse error messages, and identify
+response-embedded URLs without needing extra probes. Wrapped
+scanner tools (nuclei, etc.) and free-form curl land here in
+follow-on commits. This is the position the 2026-05-10 calibration
+arc identified as productive against modern hardened plugins —
+where `claude-bug-bounty`-style agents win on raw flexibility.
+
+Default. No env var needed.
+
+### `strict` — audit-defensible mode (opt-in)
+
+Original Modus invariants exactly: 240-char tail-only body
+excerpts, no scanner-tool wrapping, every action passes through
+the typed-grammar + Z3 + detector pipeline with the smallest
+possible LLM context surface. Use this when the operator needs to
+defend the methodology in a triage call, an attack-of-the-week
+post-mortem, or a regulatory review — `strict` mode minimises
+LLM emergence so the audit trail is fully explainable from
+deterministic rules.
+
+```bash
+export MODUS_MODE=strict
+```
+
+### What both modes guarantee
+
+| Property | Free | Strict |
+| --- | --- | --- |
+| Scope policy (`ScopePolicy`) enforcement | yes | yes |
+| Per-run observation isolation (no cross-run evidence) | yes | yes |
+| Typed action grammar (`Request`, `Probe`, `Hypothesize`, …) | yes | yes |
+| Z3 consistency precondition checks | yes | yes |
+| Deterministic detector library | yes | yes |
+| Submission-line invariant (no `submit`/`publish`/`post`) | yes | yes |
+| Body excerpt size (LLM context per response) | 4096 chars (head) | 240 chars (tail) |
+| Wrapped scanner tools (nuclei, etc.) | planned | no |
+| Free-form curl tool that bypasses typed actions | planned | no |
+
 ## What this is
 
 - **An autonomous agent with an open tool registry.** The operator

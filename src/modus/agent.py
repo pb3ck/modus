@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from modus.actions import Hypothesize, Tool
 from modus.evidence_patterns import detect_evidence_patterns
+from modus.mode import Mode, body_excerpt_limit, mode_from_env
 from modus.proposer import StepContext
 
 if TYPE_CHECKING:
@@ -127,6 +128,14 @@ class AgentLoop:
     Use as a one-shot: construct, ``await loop.run(...)``, read the
     returned :class:`SessionRecord`. The loop is stateless across
     invocations — call it again to start a fresh session.
+
+    ``mode`` toggles between two operating positions (see
+    :mod:`modus.mode`). ``"free"`` (default) gives the LLM larger
+    body excerpts in history so it can extract tokens / parse error
+    messages / find embedded URLs without extra probes. ``"strict"``
+    keeps the v0.1 240-char excerpt cap for audit-defensible
+    methodology. Both modes preserve scope enforcement, per-run
+    isolation, typed-action grammar, and Z3 preconditions.
     """
 
     proposer: Proposer
@@ -134,6 +143,7 @@ class AgentLoop:
     session: ServerSession
     execute_action: Callable[[Action], Awaitable[dict[str, Any]]]
     budget: Budget = field(default_factory=Budget)
+    mode: Mode = field(default_factory=mode_from_env)
 
     async def run(
         self,
@@ -352,7 +362,14 @@ class AgentLoop:
                     result = {"error": f"executor raised: {exc}"}
                 executed.append(chosen)
                 execution_results.append(result)
-                history.append(_summarise_step(step_index, chosen, result))
+                history.append(
+                    _summarise_step(
+                        step_index,
+                        chosen,
+                        result,
+                        body_excerpt_chars=body_excerpt_limit(self.mode),
+                    )
+                )
                 # Track observation IDs produced this run so the
                 # next step's Hypothesize precondition can gate
                 # evidence_refs to "this run only" — see #4.
@@ -781,13 +798,26 @@ def _action_dedup_key(action: Action) -> str:
     return f"{action.kind}:{hash(action.model_dump_json())}"
 
 
-def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> str:
+def _summarise_step(
+    step_index: int,
+    action: Action,
+    result: dict[str, Any],
+    *,
+    body_excerpt_chars: int = 240,
+) -> str:
     """One-line history entry the proposer sees on the next step.
 
     Compact by design — the proposer doesn't need the full payload,
     just enough to know "I already tried X and it returned Y" so
     next-step proposals don't duplicate work. Long fields (response
     bodies, search hit lists) are summarised to a count or a length.
+
+    ``body_excerpt_chars`` controls how much of the response body
+    and request body the LLM sees in history. Default 240 keeps the
+    behavior the v0.1 design committed to (small-model-friendly
+    prompts). Free-mode sessions raise this to 4096 so the LLM can
+    extract tokens, parse error messages, and identify response-
+    embedded URLs without needing extra probes. See ``modus.mode``.
     """
     base = f"step {step_index}: {action.kind}"
     parts: list[str] = []
@@ -816,10 +846,13 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
         # sees "POST /login → 200 with JWT" but not what was POSTed —
         # it can't tell a successful SQLi from a successful normal
         # login, and won't recognise the bug-class evidence pattern.
-        # Trimmed to 240 chars to match the response excerpt budget.
+        # Excerpt size scales with body_excerpt_chars (240 strict /
+        # 4096 free).
         req_body = getattr(action, "body", None)
         if isinstance(req_body, str) and req_body.strip():
-            req_excerpt = req_body.replace("\n", " ").replace("\r", " ").strip()[:240]
+            req_excerpt = (
+                req_body.replace("\n", " ").replace("\r", " ").strip()[:body_excerpt_chars]
+            )
             parts.append(f"req_body={req_excerpt!r}")
         status = result.get("status")
         if status is not None:
@@ -827,11 +860,15 @@ def _summarise_step(step_index: int, action: Action, result: dict[str, Any]) -> 
         body = result.get("response_body")
         if isinstance(body, str):
             parts.append(f"body_len={len(body)}")
-            # Tail excerpt of the response body so the proposer can spot
-            # win signals (auth tokens, error messages, version strings)
-            # without us shipping kilobyte payloads back into the prompt.
-            # 240 chars is plenty for a JWT prefix or a pithy 401 body.
-            excerpt = body.replace("\n", " ").replace("\r", " ").strip()[:240]
+            # Excerpt of the response body so the proposer can spot
+            # win signals (auth tokens, error messages, version strings,
+            # form CSRF nonces) without us shipping unbounded payloads
+            # back into the prompt. Excerpt is taken from the body's
+            # head — the historical 240-char tail-only behavior was a
+            # token-budget concession that hid form nonces and other
+            # head-of-body content (see ADR 0007). Free mode shows the
+            # head where token-bearing markup lives.
+            excerpt = body.replace("\n", " ").replace("\r", " ").strip()[:body_excerpt_chars]
             if excerpt:
                 parts.append(f"body_excerpt={excerpt!r}")
     elif action.kind == "probe":
