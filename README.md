@@ -26,15 +26,21 @@ or equivalent tool exists in the registry, and adding one is
 off-limits. Submission of a Finding to a programme is the operator's,
 performed outside Modus.
 
-> **Status: 0.4.0 (early release).** The autonomous loop runs
+> **Status: 0.5.0 (early release).** The autonomous loop runs
 > end-to-end against authorized targets *and* closes the
 > Candidate→Finding lifecycle inside the run — see
-> [`docs/quickstart.md`](./docs/quickstart.md). The action
-> vocabulary (open `ToolRegistry` per ADR-0004), the formal
+> [`docs/quickstart.md`](./docs/quickstart.md). The 0.5 line adds
+> a mining sub-agent that pumps Quarry's analytical and retrieval
+> surfaces during the autonomous loop (no longer waiting for the
+> LLM to remember `analyze_*` exists), a fail-fast probe at
+> session start that refuses to run against an uninitialised
+> corpus, and ToolRegistry-aware system-prompt rendering so
+> operator-declared tools are visible to the LLM by name. The
+> action vocabulary (open `ToolRegistry` per ADR-0004), the formal
 > consistency check, the corpus interface, the submission-line
 > invariant, and the autonomous-session MCP tool surface are
 > committed surfaces; everything else may shift between minor
-> releases until 1.0. v0.4.0 is the first non-pre-release tag —
+> releases until 1.0. v0.4.0 was the first non-pre-release tag —
 > alphas precede it back to 0.1.0a1.
 
 ## Operating modes
@@ -213,12 +219,17 @@ Modus takes a different bet, in five parts.
   requires the URL's `(host, port, tls)` in
   `allowed_endpoints`). The autonomous loop uses Z3 as a *pruner
   over sampled proposals*.
-- The corpus is **Quarry**. Cross-engagement memory, structured
-  storage, and the analytical modules
-  (`analyze_regression` / `analyze_jsdelta` / `analyze_interesting`)
-  live in Quarry, exposed through Modus's tool registry as
-  `corpus.*` entries. Reviewing what Modus did is
-  `quarry session show` or a SQLite query, not a log scrape.
+- The corpus is **Quarry**, and Modus actively pumps it. Cross-
+  engagement memory, structured storage, and the analytical
+  modules (`analyze_regression` / `analyze_jsdelta` /
+  `analyze_interesting`, plus `recall` / `coverage` / `search` /
+  `diff`) live in Quarry. A mining sub-agent inside the
+  autonomous loop calls those tools every five steps and folds
+  the resulting Candidates into the LLM's next-step context as
+  breadcrumbs — Quarry's signal-extraction layer drives the
+  agent's exploration rather than waiting for the LLM to remember
+  it exists. Reviewing what Modus did is `quarry session show`
+  or a SQLite query, not a log scrape.
 - The agent is **delivered through MCP**. The operator picks
   the host (Claude Desktop, Claude Code, Cursor, any MCP-aware
   host); the host picks the model the *host* runs. Modus's own
@@ -283,6 +294,15 @@ invariants don't.
         │                           ▼      ▼      ▼        │
         │                       shell  builtin   mcp       │
         │           (amass, nuclei, …) (request, hypoth) (host MCP)
+        │                                                  │
+        │       ┌────────────────────────────────────┐     │
+        │       │  Miner (every N steps)             │     │
+        │       │  analyze_regression / interesting  │     │
+        │       │  / jsdelta / recall / coverage /   │     │
+        │       │  search / diff                     │     │
+        │       └─────────────┬──────────────────────┘     │
+        │                     │ mining_signals             │
+        │                     ▼ into next StepContext      │
         └───────────────┬──────────────────┬───────────────┘
                         ▼                  ▼
                  in-scope target       quarry mcp
@@ -363,6 +383,98 @@ ordinary host conversation. See
 [`docs/mcp-host-integration.md`](./docs/mcp-host-integration.md)
 for full setup.
 
+## Quarry integration
+
+Quarry isn't an optional backend Modus *can* use — Quarry **is**
+the corpus dependency, and Modus is built around the assumption
+that its analytical and retrieval surfaces are live. Two
+guarantees follow from that.
+
+### Fail-fast on session start
+
+When an autonomous session starts (`run_autonomous_session` or
+`start_autonomous_session`), Modus probes Quarry with a
+`list_targets` call as a read-only no-op that completes the MCP
+handshake. If the corpus directory isn't initialised — `quarry
+init` never ran, `$QUARRY_HOME` points at a missing path, the
+Quarry binary isn't installed — the session refuses to start
+with a `RuntimeError` that names the remediation
+(`quarry init --corpus <path>`). The autonomous loop produces
+persistent state; running against an unreachable corpus would
+mean every candidate the loop emits silently fails to persist,
+the operator sees per-session output but loses cross-engagement
+recall, and the cross-session memory promise Quarry's README
+makes ("the corpus remembers Monday's recon") is broken without
+the operator noticing. Refusing at session start is the only
+way to keep that invariant honest.
+
+Per-callsite soft-fail still applies for narrower failures
+(older Quarry servers missing a specific tool, transient MCP
+hiccups) — only the session-level corpus-not-reachable
+condition becomes a hard error.
+
+### Mining sub-agent
+
+Quarry's MCP surface exposes seven analytical / retrieval tools:
+`analyze_regression`, `analyze_interesting`, `analyze_jsdelta`,
+`recall`, `coverage`, `search`, and `diff`. Without the mining
+sub-agent, those tools are merely *available* to the LLM
+proposer — they show up in the system-prompt tool catalog, but
+empirically the LLM rarely thinks to invoke them. Quarry becomes
+a write-only logbook while its signal-extraction layer sits
+dark.
+
+The mining sub-agent closes that gap. The autonomous loop's
+`AgentLoop` instantiates a `Miner` at session start and calls
+`Miner.mine()` synchronously every `mining_cadence` steps
+(default 5). Per call:
+
+- **`analyze_regression` / `analyze_interesting` / `analyze_jsdelta`**
+  run against the current target. Each Candidate they return
+  becomes a `MiningSignal`.
+- **`recall(host)`** fires once per new hostname the loop has
+  observed since the previous mining pass. Cross-engagement
+  matches surface as breadcrumbs.
+- **`coverage(target)`** surfaces unprobed assets — entries in
+  the corpus's discovery side that have no probe artifact yet.
+  Most useful when the operator runs `quarry ingest httpx.jsonl`
+  before launching: the URLs httpx surfaced become a checklist
+  the autonomous loop systematically closes.
+- **`search(query)`** fires once per session with a curated
+  query set per declared bug class
+  (`auth_bypass` → "permission_callback", "is_user_logged_in",
+  …; `idor` → "user_id", "owner_id"; etc.). Hits surface
+  cross-engagement evidence chunks or operator notes whose text
+  matches the class's canonical keywords.
+- **`diff(target)`** fires once per session, returning the
+  latest-ingest assets first-seen during that run. Pairs with
+  the operator's pre-launch `quarry ingest` step.
+
+The signals flow into the next step's `StepContext.mining_signals`
+and surface as a markdown block in the proposer's user prompt
+("Quarry analytical layer — mined signals"). The LLM can pivot
+to re-probe the flagged assets and emit fresh `Hypothesize`
+actions citing this-run evidence_refs.
+
+Per-run isolation stays intact: mining-derived evidence_refs
+point into Quarry's corpus-wide artifact pool, NOT into this
+run's observation pool. The consistency layer continues to gate
+`hypothesize.evidence_refs` to this-run observations only —
+mining surfaces breadcrumbs, the LLM re-probes, fresh
+evidence_refs come from the new observations. The firewall is
+preserved while the signal flows.
+
+Per-tool failure tolerance: any `CorpusToolsMissingError`
+(older Quarry servers without one of the analytical tools),
+`CorpusError`, or unexpected exception in a specific mining
+pass is logged at INFO and skipped. The autonomous run survives
+a partially-missing analytical surface — useful during Quarry
+upgrades or when running against an older corpus.
+
+Disable mining entirely by setting `mining_cadence=0` on the
+`AgentLoop`. The autonomous-session MCP tools don't expose this
+yet; it's primarily for testing.
+
 ## Operator tooling
 
 Beyond the MCP server, Modus ships a small CLI for operator
@@ -436,12 +548,19 @@ The provider-portable proposer is the only Modus-internal LLM
 choice; the host's LLM choice is separate and outside Modus's
 control.
 
-### v0.1 corpus
+### Corpus
 
-Any MCP server that implements the documented corpus interface.
-The reference dependency is Quarry; see
-[`docs/corpus-interface.md`](./docs/corpus-interface.md) for the
-exact tool surface Modus consumes.
+Quarry is the corpus dependency, not an interchangeable backend.
+Modus consumes the seven analytical / retrieval tools
+(`analyze_regression`, `analyze_interesting`, `analyze_jsdelta`,
+`recall`, `coverage`, `search`, `diff`) plus the write surface
+(`create_candidate`, `promote_finding`, `list_response_artifacts`)
+via the documented MCP interface in
+[`docs/corpus-interface.md`](./docs/corpus-interface.md). A
+third-party corpus server can substitute for Quarry only by
+implementing that same surface — but autonomous sessions
+fail-fast at start if any of the read surface is unreachable,
+so a partial implementation isn't a usable substitute.
 
 ## Non-goals
 
