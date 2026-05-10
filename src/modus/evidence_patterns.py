@@ -1296,30 +1296,42 @@ def _detect_info_disclosure(
 def _detect_auth_bypass(
     observations: list[SessionObservation],
 ) -> list[FallbackHypothesis]:
-    """Match same-path-different-status pairs where one is 401/403
+    """Match same-(host, path, method) pairs where one is 401/403
     and one is 200 — the canonical auth_bypass differential.
 
-    Bucketing is by ``(host, path)`` so that two observations on
-    different hosts that happen to share a path don't get treated
-    as the same endpoint. Two unrelated services both responding at
-    ``/`` (one with 200, one with 401) is not auth_bypass — it's
-    just two unrelated services. The differential only makes sense
-    when the same handler is hit with and without the right auth
-    material.
+    Bucketing key is ``(host, path, method)``. The 2026-05-10 WPForms
+    Lite audit run caught the gap with the prior ``(host, path)`` key:
+    a CORS preflight ``OPTIONS /endpoint → 200`` paired with the actual
+    ``GET /endpoint → 401`` looked like an auth_bypass. It isn't —
+    OPTIONS preflight is unauthenticated *by design* per the CORS spec,
+    and the 200 response only describes the route schema, not data.
+    Bucketing per-method puts the OPTIONS observations in their own
+    group; the GET-only group has no 200 to differentiate against; no
+    candidate fires. Real auth_bypass — two GETs to the same path, one
+    with a bypass-shaped payload returning 200, one without returning
+    401 — is still detected because both share the (host, path, GET)
+    bucket.
+
+    Two unrelated services on different hosts that share a path don't
+    get conflated either: host is in the key, so two services at ``/``
+    are still separate buckets.
     """
     out: list[FallbackHypothesis] = []
-    by_endpoint: dict[tuple[str, str], list[SessionObservation]] = {}
+    by_endpoint: dict[tuple[str, str, str], list[SessionObservation]] = {}
     for obs in observations:
         if obs.kind != "request":
             continue
         url = _request_url(obs)
         if not url:
             continue
-        key = _host_and_path(url)
-        if key is None:
+        host_path = _host_and_path(url)
+        if host_path is None:
             continue
+        method = _request_method(obs) or "GET"
+        host, path = host_path
+        key = (host, path, method)
         by_endpoint.setdefault(key, []).append(obs)
-    for (host, path), group in by_endpoint.items():
+    for (host, path, method), group in by_endpoint.items():
         statuses = {_request_status(o): o for o in group}
         protected = next((o for s, o in statuses.items() if s in (401, 403)), None)
         open_ = next((o for s, o in statuses.items() if s == 200), None)
@@ -1332,22 +1344,24 @@ def _detect_auth_bypass(
                 evidence_refs=(open_.id, protected.id),
                 rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
                     bug_class="auth_bypass",
-                    endpoint=f"{host}{path}",
+                    endpoint=f"{method} {host}{path}",
                     curl_target=_request_url(open_),
                     obs_id=open_.id,
                     status=200,
                     evidence_excerpt=(
-                        f"same host {host!r} same path {path!r} returned 200 and "
+                        f"same host {host!r} same path {path!r} same method "
+                        f"{method!r} returned 200 and "
                         f"{_request_status(protected)} on different requests "
-                        f"(this run's pool only — same-host same-path differential)"
+                        f"(this run's pool only — same-host same-path "
+                        f"same-method differential)"
                     ),
                     impact_note=(
                         "the protected variant correctly enforced auth "
                         "while the open variant did not, on the same "
-                        "endpoint shape"
+                        "endpoint+method shape"
                     ),
                 ),
-                detector="auth_bypass:same_host_path_status_differential",
+                detector="auth_bypass:same_host_path_method_status_differential",
             )
         )
     return out

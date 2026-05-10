@@ -889,6 +889,63 @@ class TestDetectEvidencePatterns:
         result = detect_evidence_patterns([obs_a, obs_b], ("auth_bypass",))
         assert result == []
 
+    def test_auth_bypass_skips_options_preflight_vs_get(self) -> None:
+        # Regression: the 2026-05-10 WPForms Lite audit promoted three
+        # false-positive auth_bypass candidates because the detector
+        # bucketed by ``(host, path)`` regardless of method. A REST API
+        # endpoint correctly returning ``OPTIONS /endpoint → 200`` (CORS
+        # preflight, route schema) and ``GET /endpoint → 401`` (auth
+        # required) tripped the differential. CORS preflight is
+        # unauthenticated by spec — the 200 doesn't represent a bypass.
+        # Now we bucket by ``(host, path, method)``: OPTIONS group has
+        # only the 200, GET group has only the 401, neither group has
+        # both 200 and 401, no candidate.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_options = self._obs(
+            "obs-options",
+            "http://target/wp-json/wpforms/v1/forms",
+            200,
+            method="OPTIONS",
+            body='{"namespace":"wpforms/v1","methods":["GET"]}',
+        )
+        obs_get = self._obs(
+            "obs-get",
+            "http://target/wp-json/wpforms/v1/forms",
+            401,
+            method="GET",
+        )
+        result = detect_evidence_patterns([obs_options, obs_get], ("auth_bypass",))
+        assert result == [], (
+            f"OPTIONS preflight vs GET on same path is not auth_bypass; "
+            f"detector fired anyway: {result}"
+        )
+
+    def test_auth_bypass_still_fires_on_same_method_differential(self) -> None:
+        # Counterpart to the OPTIONS-vs-GET regression: two GETs to the
+        # same path, one with bypass-shaped payload returning 200, one
+        # without returning 401, IS still detected. This is the canonical
+        # auth_bypass shape.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_blocked = self._obs(
+            "obs-blocked",
+            "http://target/api/admin",
+            401,
+            method="GET",
+        )
+        obs_bypassed = self._obs(
+            "obs-bypassed",
+            "http://target/api/admin",
+            200,
+            method="GET",
+            body='{"role":"admin","tokens":"..."}',
+        )
+        result = detect_evidence_patterns([obs_blocked, obs_bypassed], ("auth_bypass",))
+        assert len(result) == 1
+        assert result[0].bug_class == "auth_bypass"
+        assert set(result[0].evidence_refs) == {"obs-blocked", "obs-bypassed"}
+
     def test_idor_enumerable_user_data(self) -> None:
         from modus.evidence_patterns import detect_evidence_patterns
 
