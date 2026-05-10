@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from modus.corpus import CorpusError, CorpusToolsMissingError
 
@@ -60,7 +60,61 @@ _LOG = logging.getLogger(__name__)
 
 
 # Public so test stubs and consumers can build signals directly.
-MINING_SOURCES = ("regression", "interesting", "jsdelta", "recall", "coverage")
+MINING_SOURCES = (
+    "regression",
+    "interesting",
+    "jsdelta",
+    "recall",
+    "coverage",
+    "search",
+    "diff",
+)
+
+
+# Bug-class-driven FTS5 queries for the ``search`` mining pass.
+# Each bug class fires a curated set of queries against the corpus,
+# surfacing operator notes or prior-engagement evidence chunks that
+# match. Keys must match values accepted in ``bug_classes`` arrays at
+# session start. The queries lean on Quarry's auto-quoting of
+# hostname/URL-shaped tokens so we can pass code-shaped strings bare.
+#
+# Empirical bias: prefer terms that show up in *operator notes* and
+# WordPress/web-app code review writeups, since those are what
+# cross-engagement search most often retrieves. Terms that only
+# match adapter-produced evidence (HTTP response bodies) tend to
+# pattern-match across so many engagements they aren't useful.
+_SEARCH_QUERIES_BY_CLASS: dict[str, tuple[str, ...]] = {
+    "auth_bypass": (
+        "permission_callback",
+        "is_user_logged_in",
+        "current_user_can",
+        "rest_no_route",
+    ),
+    "idor": (
+        "user_id",
+        "owner",
+        "ownership",
+        "post_id",
+    ),
+    "sqli": (
+        "wpdb prepare",
+        "WHERE clause",
+        "SQL error",
+        "syntax error",
+    ),
+    "info_disclosure": (
+        "api_key",
+        "private",
+        "secret",
+        "leaked",
+    ),
+    "rce": (
+        "eval(",
+        "exec(",
+        "system(",
+        "remote code",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -126,14 +180,30 @@ class Miner:
     target_name: str
     _seen_keys: set[tuple[str, str]] = field(default_factory=set)
     _recall_seen_hosts: set[str] = field(default_factory=set)
+    _search_done: bool = False
+    _diff_done: bool = False
     # How many unprobed assets to surface per coverage pass. Bounded
     # so a large discovery-side / empty-probe-side corpus doesn't
     # produce a 500-bullet prompt block. The remainder still lives
     # in the corpus; the operator can drive ``quarry coverage`` from
     # the CLI for the full picture.
     coverage_max_assets_per_pass: int = 10
+    # How many search hits to surface per (class, query) pair.
+    # Quarry's ``search`` returns up to 10 by default and we have at
+    # least one query per bug class — capping to top-3 keeps the
+    # bullet count bounded.
+    search_max_hits_per_query: int = 3
+    # How many added-asset rows from ``diff`` to surface in one
+    # session. Same bounding reason as coverage; the remainder lives
+    # in the corpus.
+    diff_max_assets: int = 10
 
-    async def mine(self, *, observed_hosts: frozenset[str] = frozenset()) -> list[MiningSignal]:
+    async def mine(
+        self,
+        *,
+        observed_hosts: frozenset[str] = frozenset(),
+        bug_classes: tuple[str, ...] = (),
+    ) -> list[MiningSignal]:
         """Run one mining pass and return new signals.
 
         Tolerates per-tool failures: any ``CorpusError`` (including
@@ -147,6 +217,13 @@ class Miner:
         ``recall`` lookups. Cross-engagement memory only fires for
         hosts we haven't already recalled this session, keeping the
         prompt growth bounded.
+
+        ``bug_classes`` is the set of bug classes declared at session
+        start. Drives the ``search`` pass — for each class in
+        :data:`_SEARCH_QUERIES_BY_CLASS`, a curated set of FTS5
+        queries hits the corpus once per session. Surfaced hits are
+        cross-engagement evidence chunks or operator notes whose text
+        matches the class's canonical keywords.
         """
         signals: list[MiningSignal] = []
 
@@ -288,6 +365,154 @@ class Miner:
                             evidence_refs=(),
                         )
                     )
+
+        # Search pass — once per session. For each bug class declared
+        # at session start, fire the curated FTS5 queries against the
+        # corpus. Cross-engagement evidence and operator notes that
+        # match the class's canonical keywords surface as breadcrumbs
+        # the proposer can pivot on. Empty corpora / fresh engagements
+        # return nothing, which is fine.
+        if not self._search_done and bug_classes:
+            self._search_done = True
+            for bug_class in bug_classes:
+                queries = _SEARCH_QUERIES_BY_CLASS.get(bug_class, ())
+                for query in queries:
+                    search_seen: tuple[str, str] = ("search", f"{bug_class}:{query}")
+                    if search_seen in self._seen_keys:
+                        continue
+                    self._seen_keys.add(search_seen)
+                    raw_hits: Any
+                    try:
+                        async with self.session.with_quarry() as quarry:
+                            raw_hits = await quarry.search(query, limit=10)
+                    except CorpusToolsMissingError as exc:
+                        _LOG.info(
+                            "mining: search unavailable (%s) — skipping query=%r",
+                            exc,
+                            query,
+                        )
+                        continue
+                    except CorpusError as exc:
+                        _LOG.info(
+                            "mining: search failed (%s) — skipping query=%r",
+                            exc,
+                            query,
+                        )
+                        continue
+                    except Exception as exc:  # broad
+                        _LOG.warning(
+                            "mining: search raised (%s) — skipping query=%r",
+                            exc,
+                            query,
+                        )
+                        continue
+                    hits_iter: list[Any] = list(raw_hits or [])[: self.search_max_hits_per_query]
+                    for idx, hit in enumerate(hits_iter):
+                        # hit may be a SearchHit dataclass or a dict
+                        # depending on Quarry version; pull fields
+                        # defensively.
+                        snippet_raw: Any = getattr(hit, "snippet", None)
+                        if snippet_raw is None and isinstance(hit, dict):
+                            snippet_raw = hit.get("snippet")
+                        kind_raw: Any = getattr(hit, "kind", None)
+                        if kind_raw is None and isinstance(hit, dict):
+                            kind_raw = hit.get("kind")
+                        target_id_raw: Any = getattr(hit, "target_id", None)
+                        if target_id_raw is None and isinstance(hit, dict):
+                            target_id_raw = hit.get("target_id")
+                        if not isinstance(snippet_raw, str):
+                            continue
+                        snippet_clip = snippet_raw.replace("\n", " ").strip()
+                        if len(snippet_clip) > 200:
+                            snippet_clip = snippet_clip[:197] + "..."
+                        kind_str = str(kind_raw) if kind_raw else "evidence"
+                        target_str = str(target_id_raw) if target_id_raw else ""
+                        key = f"{bug_class}:{query}#{idx}"
+                        summary = (
+                            f"corpus match for {query!r} in {kind_str} "
+                            f"(target {target_str!r}): {snippet_clip}"
+                        )
+                        signals.append(
+                            MiningSignal(
+                                source="search",
+                                key=key,
+                                summary=summary,
+                                rationale=(
+                                    f"Quarry FTS5 search for query={query!r} "
+                                    f"(driven by bug_class={bug_class!r}) "
+                                    f"surfaced a {kind_str} match. Snippet: "
+                                    f"{snippet_clip}"
+                                ),
+                                score=0.4,
+                                evidence_refs=(),
+                            )
+                        )
+
+        # Diff pass — once per session. Quarry's ``diff`` returns
+        # the latest ingest run summary plus the assets first-seen
+        # during that run. Useful when the operator runs
+        # ``quarry ingest httpx.jsonl`` immediately before launching
+        # the audit: the new assets become first-class probe
+        # targets for the autonomous loop.
+        if not self._diff_done:
+            self._diff_done = True
+            try:
+                async with self.session.with_quarry() as quarry:
+                    diff_report = await quarry.diff(target=self.target_name)
+            except CorpusToolsMissingError as exc:
+                _LOG.info("mining: diff unavailable (%s) — skipping", exc)
+                diff_report = None
+            except CorpusError as exc:
+                _LOG.info("mining: diff failed (%s) — skipping this pass", exc)
+                diff_report = None
+            except Exception as exc:  # broad
+                _LOG.warning("mining: diff raised (%s) — skipping this pass", exc)
+                diff_report = None
+
+            if isinstance(diff_report, dict):
+                added = diff_report.get("added_assets") or []
+                if isinstance(added, list):
+                    surfaced = 0
+                    for asset in added:
+                        if not isinstance(asset, dict):
+                            continue
+                        value_raw = asset.get("value")
+                        if not isinstance(value_raw, str) or not value_raw:
+                            continue
+                        diff_key: tuple[str, str] = ("diff", value_raw)
+                        if diff_key in self._seen_keys:
+                            continue
+                        if surfaced >= self.diff_max_assets:
+                            break
+                        self._seen_keys.add(diff_key)
+                        surfaced += 1
+                        kind_label = str(asset.get("kind") or "asset")
+                        first_seen_raw = asset.get("first_seen")
+                        first_seen = (
+                            str(first_seen_raw)[:19] if isinstance(first_seen_raw, str) else ""
+                        )
+                        summary = (
+                            f"new {kind_label} {value_raw!r} first-seen in the "
+                            f"latest ingest run ({first_seen})"
+                        )
+                        signals.append(
+                            MiningSignal(
+                                source="diff",
+                                key=value_raw,
+                                summary=summary,
+                                rationale=(
+                                    f"Quarry diff against target "
+                                    f"{self.target_name!r} reports "
+                                    f"{value_raw!r} as a {kind_label} first "
+                                    f"seen in the latest ingest run. The "
+                                    f"operator just added this; the "
+                                    f"autonomous loop should probe it "
+                                    f"before older corpus-known assets."
+                                ),
+                                score=0.55,
+                                evidence_refs=(),
+                            )
+                        )
 
         if signals:
             _LOG.info(

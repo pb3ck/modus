@@ -480,7 +480,10 @@ class AgentLoop:
             if miner is not None and (step_index + 1) % self.mining_cadence == 0:
                 observed_hosts = _extract_observed_hosts(self.session.observations)
                 try:
-                    new_signals = await miner.mine(observed_hosts=observed_hosts)
+                    new_signals = await miner.mine(
+                        observed_hosts=observed_hosts,
+                        bug_classes=tuple(bug_classes),
+                    )
                 except Exception as exc:  # broad: don't kill the loop on a mining bug
                     _LOG.warning("mining pass raised unexpectedly: %s", exc)
                     new_signals = []

@@ -49,27 +49,38 @@ class _FakeQuarry:
         jsdelta: list[Candidate] | None = None,
         recall_hits: dict[str, list[dict[str, Any]]] | None = None,
         coverage_report: dict[str, Any] | None = None,
+        search_hits: dict[str, list[dict[str, Any]]] | None = None,
+        diff_report: dict[str, Any] | None = None,
         regression_raises: BaseException | None = None,
         interesting_raises: BaseException | None = None,
         jsdelta_raises: BaseException | None = None,
         coverage_raises: BaseException | None = None,
+        search_raises: BaseException | None = None,
+        diff_raises: BaseException | None = None,
     ) -> None:
         self._regression = regression or []
         self._interesting = interesting or []
         self._jsdelta = jsdelta or []
         self._recall_hits = recall_hits or {}
         self._coverage_report = coverage_report
+        self._search_hits = search_hits or {}
+        self._diff_report = diff_report
         self._regression_raises = regression_raises
         self._interesting_raises = interesting_raises
         self._jsdelta_raises = jsdelta_raises
         self._coverage_raises = coverage_raises
+        self._search_raises = search_raises
+        self._diff_raises = diff_raises
         self.call_counts: dict[str, int] = {
             "analyze_regression": 0,
             "analyze_interesting": 0,
             "analyze_jsdelta": 0,
             "recall": 0,
             "coverage": 0,
+            "search": 0,
+            "diff": 0,
         }
+        self.search_queries: list[str] = []
 
     async def analyze_regression(self, *, target: str | None = None) -> list[Candidate]:
         self.call_counts["analyze_regression"] += 1
@@ -115,6 +126,31 @@ class _FakeQuarry:
             "unprobed_count": 0,
             "unprobed": [],
             "truncated": False,
+            "note": None,
+        }
+
+    async def search(
+        self,
+        query: str,
+        *,
+        target: str | None = None,
+        limit: int = 10,
+        full: bool = False,
+    ) -> list[Any]:
+        self.call_counts["search"] += 1
+        self.search_queries.append(query)
+        if self._search_raises is not None:
+            raise self._search_raises
+        return list(self._search_hits.get(query, []))
+
+    async def diff(self, *, target: str | None = None) -> dict[str, Any]:
+        self.call_counts["diff"] += 1
+        if self._diff_raises is not None:
+            raise self._diff_raises
+        return self._diff_report or {
+            "target": target or "demo",
+            "run": None,
+            "added_assets": [],
             "note": None,
         }
 
@@ -330,6 +366,172 @@ class TestCoverageSource:
 
         signals = await miner.mine()
         assert all(s.source != "coverage" for s in signals)
+
+
+class TestSearchSource:
+    async def test_search_fires_curated_queries_per_bug_class(self) -> None:
+        fake = _FakeQuarry(
+            search_hits={
+                "permission_callback": [
+                    {
+                        "kind": "evidence",
+                        "target_id": "t-prior",
+                        "snippet": "if (!current_user_can('manage_options')) return;",
+                    }
+                ]
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine(bug_classes=("auth_bypass",))
+
+        search_signals = [s for s in signals if s.source == "search"]
+        assert len(search_signals) >= 1
+        # First curated query for auth_bypass is "permission_callback".
+        assert "permission_callback" in fake.search_queries
+        # The hit's snippet appears in the surfaced summary.
+        assert any("current_user_can" in s.summary for s in search_signals)
+
+    async def test_search_runs_once_per_session(self) -> None:
+        fake = _FakeQuarry()
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        await miner.mine(bug_classes=("auth_bypass",))
+        first_count = fake.call_counts["search"]
+        await miner.mine(bug_classes=("auth_bypass",))
+        # Second pass should NOT re-search — _search_done gates it.
+        assert fake.call_counts["search"] == first_count
+
+    async def test_search_skipped_when_no_bug_classes(self) -> None:
+        fake = _FakeQuarry(
+            search_hits={
+                "permission_callback": [{"kind": "evidence", "target_id": "t", "snippet": "x"}]
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        await miner.mine(bug_classes=())
+        assert fake.call_counts["search"] == 0
+
+    async def test_search_unknown_class_emits_no_queries(self) -> None:
+        fake = _FakeQuarry()
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        await miner.mine(bug_classes=("xss",))  # not in _SEARCH_QUERIES_BY_CLASS
+        assert fake.call_counts["search"] == 0
+
+    async def test_search_respects_max_hits_per_query(self) -> None:
+        hits = [{"kind": "evidence", "target_id": "t", "snippet": f"hit-{i}"} for i in range(10)]
+        fake = _FakeQuarry(search_hits={"permission_callback": hits})
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo", search_max_hits_per_query=2)
+
+        signals = await miner.mine(bug_classes=("auth_bypass",))
+        # Cap honoured for the first query; later queries return [].
+        permission_signals = [
+            s for s in signals if s.source == "search" and "permission_callback" in s.key
+        ]
+        assert len(permission_signals) == 2
+
+    async def test_search_tolerates_missing_tool(self) -> None:
+        fake = _FakeQuarry(
+            search_raises=CorpusToolsMissingError(missing=["search"], available=[]),
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine(bug_classes=("auth_bypass",))
+        assert all(s.source != "search" for s in signals)
+
+
+class TestDiffSource:
+    async def test_diff_surfaces_added_assets(self) -> None:
+        fake = _FakeQuarry(
+            diff_report={
+                "target": "demo",
+                "run": {"source": "httpx"},
+                "added_assets": [
+                    {
+                        "id": "a-1",
+                        "kind": "url",
+                        "value": "https://target.example.com/admin",
+                        "first_seen": "2026-05-10T12:00:00Z",
+                    },
+                    {
+                        "id": "a-2",
+                        "kind": "host",
+                        "value": "internal.example.com",
+                        "first_seen": "2026-05-10T12:00:00Z",
+                    },
+                ],
+                "note": None,
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+
+        diff_signals = [s for s in signals if s.source == "diff"]
+        assert len(diff_signals) == 2
+        assert {s.key for s in diff_signals} == {
+            "https://target.example.com/admin",
+            "internal.example.com",
+        }
+
+    async def test_diff_runs_once_per_session(self) -> None:
+        fake = _FakeQuarry()
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        await miner.mine()
+        first_count = fake.call_counts["diff"]
+        await miner.mine()
+        assert fake.call_counts["diff"] == first_count
+
+    async def test_diff_respects_max_assets(self) -> None:
+        many = [
+            {"id": f"a-{i}", "kind": "url", "value": f"https://x{i}.example.com/", "first_seen": ""}
+            for i in range(20)
+        ]
+        fake = _FakeQuarry(
+            diff_report={
+                "target": "demo",
+                "run": None,
+                "added_assets": many,
+                "note": None,
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo", diff_max_assets=5)
+
+        signals = await miner.mine()
+        diff_signals = [s for s in signals if s.source == "diff"]
+        assert len(diff_signals) == 5
+
+    async def test_diff_tolerates_missing_tool(self) -> None:
+        fake = _FakeQuarry(
+            regression=[_candidate("a.example.com", "flip")],
+            diff_raises=CorpusToolsMissingError(missing=["diff"], available=[]),
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+        assert all(s.source != "diff" for s in signals)
+        assert any(s.source == "regression" for s in signals)
+
+    async def test_diff_tolerates_malformed_payload(self) -> None:
+        fake = _FakeQuarry(diff_report={"added_assets": "not a list"})
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+        assert all(s.source != "diff" for s in signals)
 
 
 class TestMiningCadence:
