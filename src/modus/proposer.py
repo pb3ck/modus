@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from modus.consistency import CorpusState
     from modus.scope import ScopePolicy
     from modus.session import LlmProviderConfig
+    from modus.token_extractor import ExtractedToken
 
 
 _LOG = logging.getLogger(__name__)
@@ -86,6 +87,12 @@ class StepContext:
     retrieval: tuple[str, ...] = field(default_factory=tuple)
     recent_history: tuple[str, ...] = field(default_factory=tuple)
     sample_count: int = 8
+    extracted_tokens: dict[str, ExtractedToken] = field(default_factory=dict)
+    """Tokens harvested from prior observations by
+    :func:`modus.token_extractor.extract_tokens`. Indexed by canonical
+    name (e.g. ``"_wpnonce"``). The proposer's prompt renders an
+    "available tokens" block so the LLM can embed token values
+    literally in its proposed Request actions. ADR 0007."""
 
 
 class Proposer(Protocol):
@@ -355,6 +362,14 @@ class _LlmProposerBase:
             if context.recent_history
             else ""
         )
+        # ADR 0007 — extracted-token block. Surfaces curated-pattern-
+        # matched values from prior observations so the LLM can embed
+        # them literally in nonce-bearing follow-up requests.
+        token_block = ""
+        if context.extracted_tokens:
+            from modus.token_extractor import render_token_block
+
+            token_block = render_token_block(context.extracted_tokens) + "\n"
         closing_block = ""
         if context.bug_classes:
             from modus.evidence_patterns import render_patterns
@@ -408,6 +423,7 @@ class _LlmProposerBase:
             f"{_render_corpus_state(context.corpus_state)}\n"
             f"{retrieval_block}"
             f"{history_block}"
+            f"{token_block}"
             f"{closing_block}"
             f"# Your task\n\n"
             f"Propose up to {context.sample_count} candidate actions. "

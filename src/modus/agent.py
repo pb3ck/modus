@@ -701,6 +701,8 @@ class AgentLoop:
     ) -> StepContext:
         from dataclasses import replace as _dc_replace
 
+        from modus.token_extractor import extract_tokens
+
         # Wrap the session-wide corpus state with the per-run
         # observation subset, so the consistency layer's Hypothesize
         # precondition can gate evidence_refs to observations
@@ -714,6 +716,17 @@ class AgentLoop:
             session_observations=run_observations,
             run_candidates=run_candidates,
         )
+        # Harvest tokens from this run's observations so the proposer's
+        # prompt can surface them to the LLM. ADR 0007 — multi-step
+        # state extraction. Restricted to this-run observations only
+        # so prior runs' (potentially expired) tokens don't leak into
+        # this run's context.
+        if run_observations is not None:
+            this_run_obs = [obs for obs in self.session.observations if obs.id in run_observations]
+        else:
+            this_run_obs = list(self.session.observations)
+        extracted_tokens = extract_tokens(this_run_obs)
+
         return StepContext(
             corpus_state=run_state,
             scope=self.session.scope,
@@ -721,6 +734,7 @@ class AgentLoop:
             bug_classes=bug_classes,
             recent_history=tuple(history[-self.HISTORY_TAIL :]),
             sample_count=8,
+            extracted_tokens=extracted_tokens,
         )
 
     @staticmethod
