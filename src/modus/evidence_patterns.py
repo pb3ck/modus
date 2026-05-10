@@ -1296,47 +1296,62 @@ def _detect_info_disclosure(
 def _detect_auth_bypass(
     observations: list[SessionObservation],
 ) -> list[FallbackHypothesis]:
-    """Match same-(host, path, method) pairs where one is 401/403
+    """Match same-(host, path+query, method) pairs where one is 401/403
     and one is 200 — the canonical auth_bypass differential.
 
-    Bucketing key is ``(host, path, method)``. The 2026-05-10 WPForms
-    Lite audit run caught the gap with the prior ``(host, path)`` key:
-    a CORS preflight ``OPTIONS /endpoint → 200`` paired with the actual
-    ``GET /endpoint → 401`` looked like an auth_bypass. It isn't —
-    OPTIONS preflight is unauthenticated *by design* per the CORS spec,
-    and the 200 response only describes the route schema, not data.
-    Bucketing per-method puts the OPTIONS observations in their own
-    group; the GET-only group has no 200 to differentiate against; no
-    candidate fires. Real auth_bypass — two GETs to the same path, one
-    with a bypass-shaped payload returning 200, one without returning
-    401 — is still detected because both share the (host, path, GET)
-    bucket.
+    The bucket key has evolved across two real-world FP findings:
 
-    Two unrelated services on different hosts that share a path don't
-    get conflated either: host is in the key, so two services at ``/``
-    are still separate buckets.
+    * **2026-05-10 (WPForms Lite)**: bucketing by ``(host, path)`` alone
+      treated a CORS ``OPTIONS /endpoint → 200`` preflight and the
+      actual ``GET /endpoint → 401`` as an auth_bypass differential.
+      Adding ``method`` to the key fixed it.
+
+    * **2026-05-10 (user-registration, issue #36 part 1)**: bucketing
+      by ``(host, path, method)`` still over-fired on dispatch-by-
+      query-param endpoints. WordPress's ``admin-ajax.php`` dispatches
+      handlers via ``?action=…`` — two different actions look identical
+      to the bucket because the path is the same and the method is the
+      same. Adding the **sorted query string** to the key separates
+      them: ``?action=foo`` and ``?action=bar`` are different buckets,
+      so a 200/401 pair across actions doesn't trigger.
+
+    Real auth_bypass still detected: probing the same exact URL with
+    and without the right auth produces two observations in the same
+    bucket. The detector still fires when one is 200 and the other is
+    401/403. False negative on URL-token-guessing variants
+    (``?token=a`` 401 vs ``?token=b`` 200) is preferable — that's
+    parameter-tampering territory better served by a different
+    detector.
     """
     out: list[FallbackHypothesis] = []
-    by_endpoint: dict[tuple[str, str, str], list[SessionObservation]] = {}
+    by_endpoint: dict[tuple[str, str, str, str], list[SessionObservation]] = {}
     for obs in observations:
         if obs.kind != "request":
             continue
         url = _request_url(obs)
         if not url:
             continue
-        host_path = _host_and_path(url)
-        if host_path is None:
+        try:
+            parsed = urlparse(url)
+        except Exception:
             continue
+        host = (parsed.hostname or "").lower()
+        if not host:
+            continue
+        path = parsed.path or "/"
+        # Sort query parameters so semantically-equivalent URLs
+        # (``?a=1&b=2`` vs ``?b=2&a=1``) bucket together.
+        query = "&".join(sorted(parsed.query.split("&"))) if parsed.query else ""
         method = _request_method(obs) or "GET"
-        host, path = host_path
-        key = (host, path, method)
+        key = (host, path, query, method)
         by_endpoint.setdefault(key, []).append(obs)
-    for (host, path, method), group in by_endpoint.items():
+    for (host, path, query, method), group in by_endpoint.items():
         statuses = {_request_status(o): o for o in group}
         protected = next((o for s, o in statuses.items() if s in (401, 403)), None)
         open_ = next((o for s, o in statuses.items() if s == 200), None)
         if protected is None or open_ is None:
             continue
+        endpoint_label = f"{method} {host}{path}{('?' + query) if query else ''}"
         out.append(
             FallbackHypothesis(
                 bug_class="auth_bypass",
@@ -1344,24 +1359,23 @@ def _detect_auth_bypass(
                 evidence_refs=(open_.id, protected.id),
                 rationale=_FALLBACK_RATIONALE_TEMPLATE.format(
                     bug_class="auth_bypass",
-                    endpoint=f"{method} {host}{path}",
+                    endpoint=endpoint_label,
                     curl_target=_request_url(open_),
                     obs_id=open_.id,
                     status=200,
                     evidence_excerpt=(
-                        f"same host {host!r} same path {path!r} same method "
-                        f"{method!r} returned 200 and "
-                        f"{_request_status(protected)} on different requests "
-                        f"(this run's pool only — same-host same-path "
-                        f"same-method differential)"
+                        f"same host {host!r} same endpoint {endpoint_label!r} "
+                        f"returned 200 and {_request_status(protected)} on "
+                        f"different requests (this run's pool only — same-host "
+                        f"same-endpoint differential including query string)"
                     ),
                     impact_note=(
                         "the protected variant correctly enforced auth "
                         "while the open variant did not, on the same "
-                        "endpoint+method shape"
+                        "exact URL+method shape"
                     ),
                 ),
-                detector="auth_bypass:same_host_path_method_status_differential",
+                detector="auth_bypass:same_endpoint_query_method_status_differential",
             )
         )
     return out

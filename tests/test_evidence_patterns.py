@@ -889,6 +889,63 @@ class TestDetectEvidencePatterns:
         result = detect_evidence_patterns([obs_a, obs_b], ("auth_bypass",))
         assert result == []
 
+    def test_auth_bypass_skips_admin_ajax_query_dispatch(self) -> None:
+        # Regression: the 2026-05-10 user-registration audit (issue
+        # #36 part 1) caught a second FP class. WordPress's
+        # ``admin-ajax.php`` dispatches handlers via the ``?action=…``
+        # query parameter. Two different actions look identical to the
+        # ``(host, path, method)`` bucket because the path and method
+        # are the same; only the query string distinguishes them.
+        #
+        # ``GET admin-ajax.php?action=foo → 200`` and
+        # ``GET admin-ajax.php?action=bar → 403`` are NOT auth_bypass
+        # — they're two different handlers with different auth
+        # requirements. Including the sorted query string in the bucket
+        # key separates them, suppressing the FP.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_open = self._obs(
+            "obs-action-foo",
+            "http://target/wp-admin/admin-ajax.php?action=user_registration_user_form_submit",
+            200,
+            method="GET",
+            body='{"success":false,"data":{"message":"Nonce error, please reload."}}',
+        )
+        obs_blocked = self._obs(
+            "obs-action-bar",
+            "http://target/wp-admin/admin-ajax.php?action=user_registration_ajax_login_submit",
+            403,
+            method="GET",
+        )
+        result = detect_evidence_patterns([obs_open, obs_blocked], ("auth_bypass",))
+        assert result == [], (
+            f"different ?action= query params on admin-ajax.php are different "
+            f"endpoints; detector fired anyway: {result}"
+        )
+
+    def test_auth_bypass_query_order_insensitive(self) -> None:
+        # Two requests with the same query parameters in different
+        # orders should bucket together — they're the same endpoint.
+        # This protects against a regression where the sorting got
+        # accidentally removed.
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs_a = self._obs(
+            "obs-q1",
+            "http://target/api/foo?a=1&b=2",
+            401,
+            method="GET",
+        )
+        obs_b = self._obs(
+            "obs-q2",
+            "http://target/api/foo?b=2&a=1",  # same params, different order
+            200,
+            method="GET",
+            body='{"data":"sensitive"}',
+        )
+        result = detect_evidence_patterns([obs_a, obs_b], ("auth_bypass",))
+        assert len(result) == 1, f"same params different order should bucket together; got {result}"
+
     def test_auth_bypass_skips_options_preflight_vs_get(self) -> None:
         # Regression: the 2026-05-10 WPForms Lite audit promoted three
         # false-positive auth_bypass candidates because the detector
