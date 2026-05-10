@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from modus.actions import Hypothesize, Tool
 from modus.evidence_patterns import detect_evidence_patterns
+from modus.mining import Miner, MiningSignal
 from modus.mode import Mode, body_excerpt_limit, mode_from_env
 from modus.proposer import StepContext
 
@@ -144,6 +145,14 @@ class AgentLoop:
     execute_action: Callable[[Action], Awaitable[dict[str, Any]]]
     budget: Budget = field(default_factory=Budget)
     mode: Mode = field(default_factory=mode_from_env)
+    mining_cadence: int = 5
+    """How often (in steps) to run a mining pass against Quarry's
+    analytical surface. Default 5 — every fifth step runs
+    :meth:`modus.mining.Miner.mine` synchronously between the prior
+    step's execute and the next step's propose, folding new signals
+    into the next :class:`StepContext`. Set to 0 to disable mining
+    (e.g. for tests that don't want to stub the analytical-tool
+    surface). Issue #38."""
 
     async def run(
         self,
@@ -267,6 +276,16 @@ class AgentLoop:
         # ranking layer with duplicates.
         synthesized_promotion_ids: set[str] = set()
 
+        # Issue #38 — mining sub-agent. Pumps Quarry's analytical
+        # surface (analyze_regression / _interesting / _jsdelta plus
+        # cross-engagement recall) every ``mining_cadence`` steps so
+        # the corpus contributes signal back to the proposer, not
+        # just receives writes. Disabled when cadence is 0.
+        miner: Miner | None = None
+        latest_mining_signals: tuple[MiningSignal, ...] = ()
+        if self.mining_cadence > 0:
+            miner = Miner(session=self.session, target_name=target_name)
+
         for step_index in range(self.budget.max_steps):
             if (time.monotonic() - wall_started) > self.budget.max_wall_seconds:
                 record.termination_reason = "wall_time_exhausted"
@@ -279,6 +298,7 @@ class AgentLoop:
                 bug_classes=tuple(bug_classes),
                 run_observations=frozenset(run_observations),
                 run_candidates=frozenset(run_candidates),
+                mining_signals=latest_mining_signals,
             )
 
             # 1. Propose
@@ -450,6 +470,22 @@ class AgentLoop:
             if empty_streak >= self.budget.max_consecutive_empty_steps:
                 record.termination_reason = "empty_pruning_streak"
                 break
+
+            # Mining pass — every ``mining_cadence`` steps (counting
+            # the step we just finished), pump Quarry's analytical
+            # surface and fold any new signals into the next step's
+            # context. Synchronous on purpose: keeps the autonomous
+            # loop deterministic and avoids the race-condition surface
+            # of a concurrent task. Issue #38.
+            if miner is not None and (step_index + 1) % self.mining_cadence == 0:
+                observed_hosts = _extract_observed_hosts(self.session.observations)
+                try:
+                    new_signals = await miner.mine(observed_hosts=observed_hosts)
+                except Exception as exc:  # broad: don't kill the loop on a mining bug
+                    _LOG.warning("mining pass raised unexpectedly: %s", exc)
+                    new_signals = []
+                if new_signals:
+                    latest_mining_signals = tuple(new_signals)
 
         if record.termination_reason is None:
             record.termination_reason = "step_budget_exhausted"
@@ -715,6 +751,7 @@ class AgentLoop:
         bug_classes: tuple[str, ...] = (),
         run_observations: frozenset[str] | None = None,
         run_candidates: frozenset[str] = frozenset(),
+        mining_signals: tuple[MiningSignal, ...] = (),
     ) -> StepContext:
         from dataclasses import replace as _dc_replace
 
@@ -752,6 +789,7 @@ class AgentLoop:
             recent_history=tuple(history[-self.HISTORY_TAIL :]),
             sample_count=8,
             extracted_tokens=extracted_tokens,
+            mining_signals=mining_signals,
         )
 
     @staticmethod
@@ -767,6 +805,30 @@ class AgentLoop:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _extract_observed_hosts(observations: list[SessionObservation]) -> frozenset[str]:
+    """Pull hostnames out of session observations for recall lookups.
+
+    Observations carry their URL inside ``payload["url"]`` (the
+    ``Request``/``Probe`` executors stash it there at materialisation
+    time). We extract just the host component — strip scheme, strip
+    port — so a recall against that hostname checks "have I seen this
+    host in any other engagement?". Returns frozenset for
+    ``set``-difference math at the caller.
+    """
+    hosts: set[str] = set()
+    for obs in observations:
+        url = obs.payload.get("url") if isinstance(obs.payload, dict) else None
+        if not isinstance(url, str):
+            continue
+        if not url.startswith(("http://", "https://")):
+            continue
+        # http://host[:port]/path -> host
+        host = url.split("/", 3)[2].split(":")[0]
+        if host:
+            hosts.add(host)
+    return frozenset(hosts)
 
 
 def _action_dedup_key(action: Action) -> str:

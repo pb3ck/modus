@@ -94,6 +94,15 @@ class StepContext:
     name (e.g. ``"_wpnonce"``). The proposer's prompt renders an
     "available tokens" block so the LLM can embed token values
     literally in its proposed Request actions. ADR 0007."""
+    mining_signals: tuple[Any, ...] = field(default_factory=tuple)
+    """Mined :class:`modus.mining.MiningSignal` entries the
+    autonomous loop's :class:`Miner` produced since the last propose
+    call. Surfaced to the LLM via a system-prompt block so it can
+    pivot to re-probe flagged assets. Issue #38 — actively pumping
+    Quarry's analytical surface during autonomous runs. Typed as
+    ``tuple[Any, ...]`` here to keep the modus.proposer module free
+    of a hard dependency on :mod:`modus.mining`; the agent loop
+    populates this with ``MiningSignal`` instances."""
 
 
 class Proposer(Protocol):
@@ -454,6 +463,16 @@ class _LlmProposerBase:
             from modus.token_extractor import render_token_block
 
             token_block = render_token_block(context.extracted_tokens) + "\n"
+        # Issue #38 — mined-signal block. Surfaces Candidates from
+        # Quarry's analytical layer (analyze_regression, _interesting,
+        # _jsdelta) and cross-engagement recall hits, so the LLM can
+        # pivot to re-probe flagged assets rather than waiting to
+        # discover them via blind exploration.
+        mining_block = ""
+        if context.mining_signals:
+            from modus.mining import render_mining_block
+
+            mining_block = render_mining_block(context.mining_signals) + "\n"
         closing_block = ""
         if context.bug_classes:
             from modus.evidence_patterns import render_patterns
@@ -508,6 +527,7 @@ class _LlmProposerBase:
             f"{retrieval_block}"
             f"{history_block}"
             f"{token_block}"
+            f"{mining_block}"
             f"{closing_block}"
             f"# Your task\n\n"
             f"Propose up to {context.sample_count} candidate actions. "
