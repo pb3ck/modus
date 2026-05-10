@@ -48,22 +48,27 @@ class _FakeQuarry:
         interesting: list[Candidate] | None = None,
         jsdelta: list[Candidate] | None = None,
         recall_hits: dict[str, list[dict[str, Any]]] | None = None,
+        coverage_report: dict[str, Any] | None = None,
         regression_raises: BaseException | None = None,
         interesting_raises: BaseException | None = None,
         jsdelta_raises: BaseException | None = None,
+        coverage_raises: BaseException | None = None,
     ) -> None:
         self._regression = regression or []
         self._interesting = interesting or []
         self._jsdelta = jsdelta or []
         self._recall_hits = recall_hits or {}
+        self._coverage_report = coverage_report
         self._regression_raises = regression_raises
         self._interesting_raises = interesting_raises
         self._jsdelta_raises = jsdelta_raises
+        self._coverage_raises = coverage_raises
         self.call_counts: dict[str, int] = {
             "analyze_regression": 0,
             "analyze_interesting": 0,
             "analyze_jsdelta": 0,
             "recall": 0,
+            "coverage": 0,
         }
 
     async def analyze_regression(self, *, target: str | None = None) -> list[Candidate]:
@@ -95,6 +100,23 @@ class _FakeQuarry:
         if value is None:
             return []
         return list(self._recall_hits.get(value, []))
+
+    async def coverage(self, *, target: str | None = None) -> dict[str, Any]:
+        self.call_counts["coverage"] += 1
+        if self._coverage_raises is not None:
+            raise self._coverage_raises
+        # Default to an empty-but-shaped report so tests that don't
+        # explicitly set coverage still exercise the parser without
+        # surfacing signals.
+        return self._coverage_report or {
+            "target": target or "demo",
+            "discovered": 0,
+            "probed": 0,
+            "unprobed_count": 0,
+            "unprobed": [],
+            "truncated": False,
+            "note": None,
+        }
 
 
 def _session_with_quarry(fake: _FakeQuarry) -> ServerSession:
@@ -207,6 +229,107 @@ class TestMinerInIsolation:
 
         signals = await miner.mine()
         assert {s.source for s in signals} == {"interesting"}
+
+
+class TestCoverageSource:
+    async def test_coverage_emits_signal_for_each_unprobed_asset(self) -> None:
+        fake = _FakeQuarry(
+            coverage_report={
+                "target": "demo",
+                "discovered": 5,
+                "probed": 2,
+                "unprobed_count": 3,
+                "unprobed": [
+                    "admin.example.com",
+                    "api.example.com",
+                    "internal.example.com",
+                ],
+                "truncated": False,
+                "note": None,
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+        coverage_signals = [s for s in signals if s.source == "coverage"]
+        assert len(coverage_signals) == 3
+        assert {s.key for s in coverage_signals} == {
+            "admin.example.com",
+            "api.example.com",
+            "internal.example.com",
+        }
+        # Coverage was called exactly once this pass.
+        assert fake.call_counts["coverage"] == 1
+
+    async def test_coverage_respects_max_assets_per_pass(self) -> None:
+        unprobed = [f"asset-{i}.example.com" for i in range(50)]
+        fake = _FakeQuarry(
+            coverage_report={
+                "target": "demo",
+                "discovered": 50,
+                "probed": 0,
+                "unprobed_count": 50,
+                "unprobed": unprobed,
+                "truncated": False,
+                "note": None,
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(
+            session=session,
+            target_name="demo",
+            coverage_max_assets_per_pass=5,
+        )
+
+        signals = await miner.mine()
+        coverage_signals = [s for s in signals if s.source == "coverage"]
+        # First-pass cap of 5 honoured even though Quarry returned 50.
+        assert len(coverage_signals) == 5
+
+    async def test_coverage_dedupes_across_passes(self) -> None:
+        fake = _FakeQuarry(
+            coverage_report={
+                "target": "demo",
+                "discovered": 1,
+                "probed": 0,
+                "unprobed_count": 1,
+                "unprobed": ["admin.example.com"],
+                "truncated": False,
+                "note": None,
+            }
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        first = await miner.mine()
+        second = await miner.mine()
+        # Same asset returned by Quarry on both passes; mining
+        # surfaces it only once.
+        assert sum(1 for s in first if s.source == "coverage") == 1
+        assert sum(1 for s in second if s.source == "coverage") == 0
+
+    async def test_coverage_tolerates_missing_tool(self) -> None:
+        fake = _FakeQuarry(
+            regression=[_candidate("a.example.com", "flip")],
+            coverage_raises=CorpusToolsMissingError(missing=["coverage"], available=[]),
+        )
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+        # Regression survived; coverage gracefully absent.
+        assert {s.source for s in signals} == {"regression"}
+
+    async def test_coverage_tolerates_malformed_payload(self) -> None:
+        # Quarry returns the dict but ``unprobed`` is the wrong shape
+        # (e.g. an older server schema). The miner must not crash.
+        fake = _FakeQuarry(coverage_report={"unprobed": "not a list"})
+        session = _session_with_quarry(fake)
+        miner = Miner(session=session, target_name="demo")
+
+        signals = await miner.mine()
+        assert all(s.source != "coverage" for s in signals)
 
 
 class TestMiningCadence:

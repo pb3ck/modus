@@ -60,7 +60,7 @@ _LOG = logging.getLogger(__name__)
 
 
 # Public so test stubs and consumers can build signals directly.
-MINING_SOURCES = ("regression", "interesting", "jsdelta", "recall")
+MINING_SOURCES = ("regression", "interesting", "jsdelta", "recall", "coverage")
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,12 @@ class Miner:
     target_name: str
     _seen_keys: set[tuple[str, str]] = field(default_factory=set)
     _recall_seen_hosts: set[str] = field(default_factory=set)
+    # How many unprobed assets to surface per coverage pass. Bounded
+    # so a large discovery-side / empty-probe-side corpus doesn't
+    # produce a 500-bullet prompt block. The remainder still lives
+    # in the corpus; the operator can drive ``quarry coverage`` from
+    # the CLI for the full picture.
+    coverage_max_assets_per_pass: int = 10
 
     async def mine(self, *, observed_hosts: frozenset[str] = frozenset()) -> list[MiningSignal]:
         """Run one mining pass and return new signals.
@@ -222,6 +228,66 @@ class Miner:
                         evidence_refs=(),
                     )
                 )
+
+        # Coverage pass. Quarry's ``coverage`` returns the in-corpus
+        # gap between discovery-side artifacts (subfinder, etc.) and
+        # probe-side artifacts (httpx, katana, responses). For Modus
+        # the actionable signal is: "asset X is in the corpus's
+        # discovery side but has no probe artifact — go probe it."
+        # Most useful when the operator pre-ingested recon before
+        # launching the autonomous run; on a cold-start corpus this
+        # typically returns an empty unprobed list, which is fine.
+        try:
+            async with self.session.with_quarry() as quarry:
+                report = await quarry.coverage(target=self.target_name)
+        except CorpusToolsMissingError as exc:
+            _LOG.info("mining: coverage unavailable (%s) — skipping", exc)
+            report = None
+        except CorpusError as exc:
+            _LOG.info("mining: coverage failed (%s) — skipping this pass", exc)
+            report = None
+        except Exception as exc:  # broad
+            _LOG.warning("mining: coverage raised (%s) — skipping this pass", exc)
+            report = None
+
+        if isinstance(report, dict):
+            unprobed = report.get("unprobed") or []
+            if isinstance(unprobed, list):
+                surfaced = 0
+                for asset in unprobed:
+                    if not isinstance(asset, str) or not asset:
+                        continue
+                    key = ("coverage", asset)
+                    if key in self._seen_keys:
+                        continue
+                    if surfaced >= self.coverage_max_assets_per_pass:
+                        break
+                    self._seen_keys.add(key)
+                    surfaced += 1
+                    note = report.get("note") or ""
+                    summary = (
+                        "discovered in corpus but no probe artifact yet — probe to close the gap"
+                    )
+                    if isinstance(note, str) and note:
+                        # Trim to keep the bullet bounded.
+                        summary = f"{summary}. note: {note[:120]}"
+                    signals.append(
+                        MiningSignal(
+                            source="coverage",
+                            key=asset,
+                            summary=summary,
+                            rationale=(
+                                f"Quarry coverage reports {asset} as an "
+                                f"unprobed asset for target "
+                                f"{self.target_name!r}. The autonomous "
+                                f"loop should issue a Request or Probe "
+                                f"against this asset before the budget "
+                                f"runs out."
+                            ),
+                            score=0.6,
+                            evidence_refs=(),
+                        )
+                    )
 
         if signals:
             _LOG.info(
