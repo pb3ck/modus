@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from modus.scope import ScopePolicy
     from modus.session import LlmProviderConfig
     from modus.token_extractor import ExtractedToken
+    from modus.tools import ToolRegistry
 
 
 _LOG = logging.getLogger(__name__)
@@ -159,9 +160,9 @@ discriminator:
   above. The consistency layer dispatches preconditions via the \
   registry; emitting a ``tool`` action with an unregistered name \
   fails the precondition check and is silently dropped before \
-  execution. **Today the registry is empty** — at v0.3.0a-WIP this \
-  action validates structurally but every emission is rejected by \
-  the consistency layer. Use one of the typed actions above for now.
+  execution. **The registry's current contents are listed in the \
+  "Registered tools" block below the scope** — invoke any of those \
+  by name. Names not in that block fail the precondition check.
 - ``hypothesize(bug_class, evidence_refs, rationale, severity_hint?)`` \
   — author a Candidate. Terminal; this is where the agent commits \
   what it found. The ``rationale`` is read by the operator to triage \
@@ -217,6 +218,72 @@ def _render_corpus_state(state: CorpusState) -> str:
         f"known_observations={sorted(state.known_observations)}\n"
         f"known_evidence={sorted(state.known_evidence)}\n"
     )
+
+
+def _render_tool_registry(registry: ToolRegistry | None) -> str:
+    """Render the registered-tool catalog for the system prompt.
+
+    The 2026-05-10 wp-bounty-lab iteration 2 caught the gap: ``raw.http``
+    was correctly registered when the operator opted in, the
+    ``tool(name="raw.http", ...)`` action would have passed Z3, but the
+    LLM never invoked it because the prompt's action-grammar block
+    only enumerated the typed actions. The registry's contents weren't
+    visible to the LLM by name.
+
+    This renders the registry's ``specs()`` into a markdown table the
+    LLM can scan: tool name, description, args schema, side-effect
+    tier. Empty / None registry → empty string (no prompt block), so
+    the typed-actions-only invocation paths stay compact.
+
+    Filters out the six typed-action specs (probe/request/compare/etc.)
+    since they're already covered by ``_VOCABULARY_DESCRIPTION`` —
+    listing them again under "registered tools" would double the prompt
+    weight without adding new information.
+    """
+    if registry is None:
+        return ""
+    typed_action_names = {
+        "probe",
+        "request",
+        "compare",
+        "differential",
+        "annotate",
+        "hypothesize",
+    }
+    extra_specs = tuple(s for s in registry.specs() if s.name not in typed_action_names)
+    if not extra_specs:
+        return ""
+    lines = [
+        "# Registered tools (invoke via `tool(name=..., args=...)`)",
+        "",
+        (
+            "These are the non-typed-action tools the operator has "
+            "registered for this session. Invoke them via the `tool` "
+            "action grammar (see Action grammar above). Each entry "
+            "lists the canonical name, description, side-effect tier, "
+            "and JSON-schema for its `args`. Names not in this list "
+            "fail the consistency layer's `tool_registered:<name>` "
+            "precondition and are silently dropped."
+        ),
+        "",
+    ]
+    for spec in extra_specs:
+        lines.append(f"## `{spec.name}` ({spec.side_effect})")
+        lines.append("")
+        lines.append(spec.description)
+        lines.append("")
+        # Compact args representation — the full JSON schema can be
+        # large; the shape is what the LLM needs.
+        if spec.args_schema:
+            import json as _json
+
+            args_summary = _json.dumps(spec.args_schema, separators=(",", ":"))
+            # Truncate ridiculously-long schemas; keep the head.
+            if len(args_summary) > 600:
+                args_summary = args_summary[:600] + "…"
+            lines.append(f"args: `{args_summary}`")
+            lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 def _render_scope(scope: ScopePolicy) -> str:
@@ -309,18 +376,34 @@ class _LlmProposerBase:
     construction, response parsing, error handling) is shared.
     """
 
-    def __init__(self, *, scope: ScopePolicy, model: str, max_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        *,
+        scope: ScopePolicy,
+        model: str,
+        max_tokens: int = 4096,
+        tool_registry: ToolRegistry | None = None,
+    ) -> None:
         self._scope = scope
         self._model = model
         self._max_tokens = max_tokens
+        self._tool_registry = tool_registry
 
     def _system_prompt(self) -> str:
-        """The cache-friendly prefix: vocabulary + scope.
+        """The cache-friendly prefix: vocabulary + scope + tool registry.
 
-        Stable across all steps in a session — same scope and same
-        action grammar. Anthropic's prompt cache attaches to this
-        block. Other providers see it as ordinary system text.
+        Stable across all steps in a session — same scope, same action
+        grammar, same registry. Anthropic's prompt cache attaches to
+        this block. Other providers see it as ordinary system text.
+
+        The registry block lists the non-typed-action tools the
+        operator has registered (corpus.promote_finding, recon shells,
+        ``raw.http`` when opted-in, operator-declared scope-file
+        tools). Without this, the LLM only knows about the six typed
+        actions and never reaches for tools it doesn't see by name.
         """
+        registry_block = _render_tool_registry(self._tool_registry)
+        registry_section = "\n" + registry_block + "\n" if registry_block else ""
         return (
             "You are Modus, an autonomous offensive security agent operating "
             "under formal scope constraints. You propose actions from a typed "
@@ -343,6 +426,7 @@ class _LlmProposerBase:
             f"{_VOCABULARY_DESCRIPTION}\n"
             "# Scope (immutable for this session)\n\n"
             f"{_render_scope(self._scope)}"
+            f"{registry_section}"
         )
 
     def _user_prompt(self, context: StepContext) -> str:
@@ -466,8 +550,14 @@ class AnthropicProposer(_LlmProposerBase):
         model: str | None = None,
         max_tokens: int = 4096,
         client: Any | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
-        super().__init__(scope=scope, model=model or self.DEFAULT_MODEL, max_tokens=max_tokens)
+        super().__init__(
+            scope=scope,
+            model=model or self.DEFAULT_MODEL,
+            max_tokens=max_tokens,
+            tool_registry=tool_registry,
+        )
         if client is not None:
             self._client = client
         else:
@@ -520,8 +610,14 @@ class OpenAICompatibleProposer(_LlmProposerBase):
         model: str | None = None,
         max_tokens: int = 4096,
         client: Any | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
-        super().__init__(scope=scope, model=model or self.DEFAULT_MODEL, max_tokens=max_tokens)
+        super().__init__(
+            scope=scope,
+            model=model or self.DEFAULT_MODEL,
+            max_tokens=max_tokens,
+            tool_registry=tool_registry,
+        )
         if client is not None:
             self._client = client
         else:
@@ -589,8 +685,14 @@ class HostSamplingProposer(_LlmProposerBase):
         scope: ScopePolicy,
         mcp_session: Any,
         max_tokens: int = 4096,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
-        super().__init__(scope=scope, model=self.DEFAULT_MODEL, max_tokens=max_tokens)
+        super().__init__(
+            scope=scope,
+            model=self.DEFAULT_MODEL,
+            max_tokens=max_tokens,
+            tool_registry=tool_registry,
+        )
         self._session = mcp_session
 
     async def _complete(self, system: str, user: str) -> str:
@@ -659,11 +761,13 @@ class ClaudeCliProposer(_LlmProposerBase):
         model: str | None = None,
         max_tokens: int = 4096,
         timeout_seconds: float = 120.0,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         super().__init__(
             scope=scope,
             model=model or self.DEFAULT_MODEL,
             max_tokens=max_tokens,
+            tool_registry=tool_registry,
         )
         self._claude_bin = claude_bin
         self._timeout_seconds = timeout_seconds
@@ -876,6 +980,7 @@ def make_proposer(
     scope: ScopePolicy,
     mcp_session: Any | None = None,
     recon_floor: bool = True,
+    tool_registry: ToolRegistry | None = None,
 ) -> Proposer:
     """Construct the right proposer for the operator's configured provider.
 
@@ -902,21 +1007,30 @@ def make_proposer(
                 "ServerSession; this proposer cannot work outside an "
                 "MCP request context."
             )
-        inner = HostSamplingProposer(scope=scope, mcp_session=mcp_session)
+        inner = HostSamplingProposer(
+            scope=scope, mcp_session=mcp_session, tool_registry=tool_registry
+        )
     elif llm.provider == "claude-cli":
         inner = ClaudeCliProposer(
             scope=scope,
             claude_bin=llm.base_url or "claude",
             model=llm.model,
+            tool_registry=tool_registry,
         )
     elif llm.provider == "anthropic":
-        inner = AnthropicProposer(scope=scope, api_key=llm.api_key, model=llm.model)
+        inner = AnthropicProposer(
+            scope=scope,
+            api_key=llm.api_key,
+            model=llm.model,
+            tool_registry=tool_registry,
+        )
     elif llm.provider in ("openai", "openai-compatible"):
         inner = OpenAICompatibleProposer(
             scope=scope,
             api_key=llm.api_key,
             base_url=llm.base_url,
             model=llm.model,
+            tool_registry=tool_registry,
         )
     else:
         raise ValueError(f"unsupported LLM provider: {llm.provider!r}")

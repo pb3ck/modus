@@ -133,7 +133,109 @@ def _step_context(*, sample_count: int = 4) -> StepContext:
     )
 
 
-# ------------------------------------------------------------ parser
+# ------------------------------------------------------------ tool registry rendering
+
+
+class TestRenderToolRegistry:
+    """The 2026-05-10 wp-bounty-lab iteration 2 caught the gap: the
+    LLM's prompt described the typed-action grammar but never
+    enumerated the tool registry's contents. ``raw.http`` was
+    correctly registered but the LLM never invoked it because it
+    didn't know the name. ``_render_tool_registry`` closes that gap.
+    """
+
+    def test_none_returns_empty(self) -> None:
+        from modus.proposer import _render_tool_registry
+
+        assert _render_tool_registry(None) == ""
+
+    def test_empty_registry_returns_empty(self) -> None:
+        # A registry with only the typed-action specs (probe/request/...)
+        # also renders empty — those are already covered by the action
+        # grammar block, listing them again is noise.
+        from modus.proposer import _render_tool_registry
+        from modus.tools import ToolRegistry, builtin_typed_action_specs
+
+        registry = ToolRegistry()
+        for spec in builtin_typed_action_specs():
+            registry.register(spec)
+        assert _render_tool_registry(registry) == ""
+
+    def test_renders_corpus_promote_finding(self) -> None:
+        from modus.proposer import _render_tool_registry
+        from modus.tools import build_default_registry
+
+        # Default registry includes corpus.promote_finding +
+        # amass.enum + nuclei.scan. None are typed actions; all
+        # should render.
+        out = _render_tool_registry(build_default_registry())
+        assert "## `corpus.promote_finding`" in out
+        assert "## `amass.enum`" in out
+        assert "## `nuclei.scan`" in out
+        # The Action-grammar's typed actions are NOT duplicated here.
+        assert "## `request`" not in out
+        assert "## `probe`" not in out
+        assert "## `hypothesize`" not in out
+
+    def test_renders_raw_http_when_opt_in(self) -> None:
+        # Issue #36 part 2 / Path B: the whole reason this rendering
+        # exists. raw.http only appears when the operator opts in via
+        # MODUS_ALLOW_RAW_HTTP=1; when registered, the LLM has to see
+        # it in the prompt to invoke it.
+        import os
+
+        from modus.proposer import _render_tool_registry
+        from modus.tools import build_default_registry
+
+        prior = os.environ.get("MODUS_ALLOW_RAW_HTTP")
+        os.environ["MODUS_ALLOW_RAW_HTTP"] = "1"
+        try:
+            out = _render_tool_registry(build_default_registry())
+        finally:
+            if prior is None:
+                os.environ.pop("MODUS_ALLOW_RAW_HTTP", None)
+            else:
+                os.environ["MODUS_ALLOW_RAW_HTTP"] = prior
+        assert "## `raw.http`" in out
+        # The args schema is rendered so the LLM knows what to pass.
+        assert "method" in out
+        assert "url" in out
+
+    def test_args_schema_truncated_for_huge_specs(self) -> None:
+        # Defensive: a tool spec with a multi-KB args schema shouldn't
+        # bloat the prompt unboundedly. Schemas larger than 600 chars
+        # are truncated with an ellipsis.
+        import re
+
+        from modus.proposer import _render_tool_registry
+        from modus.tools import (
+            BuiltinInvocation,
+            ToolRegistry,
+            ToolSpec,
+        )
+
+        # Build a synthetic spec with an enormous args schema.
+        big_schema = {
+            "type": "object",
+            "properties": {f"field_{i}": {"type": "string"} for i in range(50)},
+        }
+        spec = ToolSpec(
+            name="custom.huge",
+            kind="builtin",
+            description="A test tool with a very large args schema.",
+            args_schema=big_schema,
+            side_effect="read",
+            invocation=BuiltinInvocation(callable_dotted_path="x.y"),
+        )
+        registry = ToolRegistry()
+        registry.register(spec)
+        out = _render_tool_registry(registry)
+        # Schema output line should be present but truncated.
+        match = re.search(r"args: `(.+?)`", out)
+        assert match is not None
+        rendered = match.group(1)
+        assert rendered.endswith("…"), f"expected ellipsis truncation, got: {rendered!r}"
+        assert len(rendered) <= 605  # 600 + ellipsis
 
 
 class TestParser:

@@ -834,6 +834,7 @@ class ModusServer:
                 llm=self.session.llm,
                 scope=self.session.scope,
                 mcp_session=host_mcp_session,
+                tool_registry=self.session.tool_registry,
             )
         except (ValueError, ImportError) as exc:
             return {"error": f"failed to construct proposer: {exc}"}

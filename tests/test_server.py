@@ -692,7 +692,7 @@ class TestAutonomousToolGate:
         # returns a deterministic FixedProposer — avoids touching the
         # real anthropic client.
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -730,7 +730,7 @@ class TestAutonomousToolGate:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer(
                 [
@@ -920,7 +920,7 @@ class TestReconJsonlSeeding:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -965,7 +965,7 @@ class TestReconJsonlSeeding:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -1033,7 +1033,7 @@ class TestReconJsonlSeeding:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -1074,7 +1074,7 @@ class TestReconJsonlSeeding:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -1343,7 +1343,7 @@ class TestAsyncAutonomousSession:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -1383,7 +1383,7 @@ class TestAsyncAutonomousSession:
         # Two distinct probes so the loop's strict-dedup ranker has
         # a non-duplicate survivor each step → two steps execute.
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer(
                 [
@@ -1460,7 +1460,7 @@ class TestAsyncAutonomousSession:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return _HangingProposer()
 
@@ -1521,7 +1521,7 @@ class TestAsyncAutonomousSession:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return FixedProposer([Probe(target="target.example.com")])
 
@@ -1578,7 +1578,7 @@ class TestAsyncAutonomousSession:
         )
 
         def _stub_make_proposer(
-            *, llm: object, scope: object, mcp_session: object = None
+            *, llm: object, scope: object, mcp_session: object = None, **kwargs: object
         ) -> object:
             return _HangingProposer()
 
