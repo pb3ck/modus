@@ -257,12 +257,12 @@ class Miner:
                 for asset in unprobed:
                     if not isinstance(asset, str) or not asset:
                         continue
-                    key = ("coverage", asset)
-                    if key in self._seen_keys:
+                    seen_key: tuple[str, str] = ("coverage", asset)
+                    if seen_key in self._seen_keys:
                         continue
                     if surfaced >= self.coverage_max_assets_per_pass:
                         break
-                    self._seen_keys.add(key)
+                    self._seen_keys.add(seen_key)
                     surfaced += 1
                     note = report.get("note") or ""
                     summary = (
