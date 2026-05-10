@@ -713,6 +713,82 @@ class TestAutonomousToolGate:
         assert result["session"]["step_count"] == 1
         assert result["session"]["executed_count"] == 1
 
+    async def test_run_autonomous_session_fails_fast_when_corpus_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quarry is the corpus dependency — an autonomous session
+        must refuse to start if the corpus isn't reachable, rather
+        than silently degrading to per-callsite ``persistence_error``
+        rows in the result JSON.
+        """
+        from contextlib import asynccontextmanager
+
+        from modus.corpus import CorpusUnavailableError
+
+        server, session = _server_with(
+            quarry=None,  # no fake — we install a raising one below
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        @asynccontextmanager
+        async def _raising_quarry():  # type: ignore[no-untyped-def]
+            raise CorpusUnavailableError("no corpus at /tmp/missing — run `quarry init` first")
+            yield  # pragma: no cover — unreachable
+
+        session.with_quarry = _raising_quarry  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match=r"quarry init"):
+            await server._dispatch(
+                "run_autonomous_session",
+                {
+                    "target": "demo",
+                    "bug_classes": ["idor"],
+                    "budget": {"max_steps": 1, "max_wall_seconds": 5},
+                },
+            )
+
+    async def test_start_autonomous_session_fails_fast_when_corpus_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from contextlib import asynccontextmanager
+
+        from modus.corpus import CorpusUnavailableError
+
+        server, session = _server_with(
+            quarry=None,
+            llm=LlmProviderConfig(
+                provider="anthropic",
+                model=None,
+                api_key="sk-ant-fake",
+                base_url=None,
+            ),
+        )
+
+        @asynccontextmanager
+        async def _raising_quarry():  # type: ignore[no-untyped-def]
+            raise CorpusUnavailableError("no corpus at /tmp/missing — run `quarry init` first")
+            yield  # pragma: no cover — unreachable
+
+        session.with_quarry = _raising_quarry  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match=r"quarry init"):
+            await server._dispatch(
+                "start_autonomous_session",
+                {
+                    "target": "demo",
+                    "bug_classes": ["idor"],
+                    "budget": {"max_steps": 1, "max_wall_seconds": 5},
+                },
+            )
+        # No async session should have been registered on the
+        # failed-fast path.
+        assert session.async_sessions == {}
+
     async def test_propose_actions_returns_pruned_proposals(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

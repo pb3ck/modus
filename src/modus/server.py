@@ -56,7 +56,12 @@ from modus.actions import (
     Tool,
 )
 from modus.consistency import ConsistencyChecker, Verdict
-from modus.corpus import CorpusClient, CorpusError, CorpusToolsMissingError
+from modus.corpus import (
+    CorpusClient,
+    CorpusError,
+    CorpusToolsMissingError,
+    CorpusUnavailableError,
+)
 from modus.executor import HttpExecutor
 from modus.proposer import make_proposer
 from modus.session import AsyncSession, ServerSession, SessionCandidate, SessionObservation
@@ -842,15 +847,50 @@ class ModusServer:
         if name == "run_autonomous_session":
             return await self._run_autonomous_session(proposer, arguments)
         if name == "start_autonomous_session":
-            return self._start_autonomous_session(proposer, arguments)
+            return await self._start_autonomous_session(proposer, arguments)
         if name == "propose_actions":
             return await self._propose_actions(proposer, arguments)
         return {"error": f"unknown autonomous tool: {name!r}"}
+
+    async def _verify_corpus_ready(self) -> None:
+        """Fail-fast check that the Quarry corpus is reachable.
+
+        The autonomous-session loop produces candidates that MUST land
+        in Quarry for the cross-session-memory guarantee in Quarry's
+        README to hold. If the corpus isn't initialised, every
+        candidate the loop emits will silently fail to persist
+        (``persistence_error`` in the result), the operator gets
+        per-session output but loses cross-engagement recall, and the
+        ``Quarry is the corpus dependency`` invariant is violated.
+
+        We probe with ``list_targets`` (a read-only no-op that
+        completes the MCP handshake). On
+        :class:`CorpusUnavailableError` — the corpus dir doesn't
+        exist, isn't initialised, or the Quarry binary isn't installed
+        — we re-raise with a remediation hint pointing at
+        ``quarry init``. On any other ``CorpusError`` (older Quarry
+        without all read tools, transient tool failures) we let the
+        run proceed; per-callsite soft-fail handles those.
+        """
+        try:
+            async with self.session.with_quarry() as quarry:
+                await quarry.list_targets()
+        except CorpusUnavailableError as exc:
+            raise RuntimeError(
+                f"Quarry corpus is not reachable: {exc}\n"
+                "Initialise it before starting an autonomous session: "
+                "`quarry init --corpus <path>` (or set $QUARRY_HOME). "
+                "Quarry is the corpus dependency; the autonomous loop "
+                "produces persistent state and refuses to start without "
+                "a live corpus."
+            ) from exc
 
     async def _run_autonomous_session(
         self, proposer: Any, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         from modus.agent import AgentLoop, Budget
+
+        await self._verify_corpus_ready()
 
         target = str(arguments.get("target") or self.session.scope.target_name)
         bug_classes = list(arguments.get("bug_classes") or [])
@@ -903,7 +943,9 @@ class ModusServer:
             result["recon_warning"] = recon_warning
         return result
 
-    def _start_autonomous_session(self, proposer: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _start_autonomous_session(
+        self, proposer: Any, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         """Kick off ``AgentLoop.run`` as a detached asyncio task.
 
         Returns immediately with a ``session_id`` the host can poll
@@ -915,6 +957,8 @@ class ModusServer:
         ``record.steps`` from the loop, never reorder or rewrite).
         """
         from modus.agent import AgentLoop, Budget, SessionRecord
+
+        await self._verify_corpus_ready()
 
         target = str(arguments.get("target") or self.session.scope.target_name)
         bug_classes = list(arguments.get("bug_classes") or [])
