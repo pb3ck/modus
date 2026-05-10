@@ -625,6 +625,121 @@ def builtin_recon_tool_specs() -> tuple[ToolSpec, ...]:
     )
 
 
+def builtin_free_mode_tool_specs() -> tuple[ToolSpec, ...]:
+    """Free-mode-only tool specs gated on operator opt-in env vars.
+
+    Currently a single entry: ``raw.http``, the typed-grammar bypass
+    that gives the LLM curl-equivalent flexibility. Doubly gated:
+
+    * Mode must be ``free`` (``MODUS_MODE`` unset or ``free``).
+    * Operator must opt in by setting ``MODUS_ALLOW_RAW_HTTP=1``.
+
+    Strict mode never registers this tool, regardless of the env var.
+    The audit-defensibility property of strict mode is preserved
+    without operator forethought.
+
+    Even when registered, the scope perimeter still holds — the
+    builtin's preconditions verify ``(host, port, tls)`` is in
+    scope and the method is in ``allowed_methods`` before any
+    traffic goes out.
+    """
+    from modus.builtins.raw_http import is_enabled
+
+    if not is_enabled():
+        return ()
+    return (
+        ToolSpec(
+            name="raw.http",
+            kind="builtin",
+            description=(
+                "Execute an arbitrary HTTP request against an in-scope "
+                "target. Curl-equivalent for the LLM: any method, any "
+                "headers, any body. Scope perimeter still enforced — "
+                "URL must resolve to an in-scope (host, port, tls) "
+                "triple, method must be in the session's allowed-methods "
+                "set. Args: {method, url, headers?, body?, "
+                "follow_redirects?}. Free-mode + opt-in only "
+                "(MODUS_ALLOW_RAW_HTTP=1). Use sparingly — the typed "
+                "Request action is preferred for auditability; raw.http "
+                "is for cases where the typed shape can't express what "
+                "you need (multipart bodies, unusual content types, "
+                "compound chains)."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "enum": [
+                            "GET",
+                            "HEAD",
+                            "POST",
+                            "PUT",
+                            "PATCH",
+                            "DELETE",
+                            "OPTIONS",
+                        ],
+                    },
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "body": {"type": "string"},
+                    "follow_redirects": {"type": "boolean"},
+                },
+                "required": ["method", "url"],
+                "additionalProperties": False,
+            },
+            side_effect="active",
+            invocation=BuiltinInvocation(
+                callable_dotted_path="modus.builtins.raw_http.raw_http",
+            ),
+            preconditions=_raw_http_preconditions,
+        ),
+    )
+
+
+def _raw_http_preconditions(
+    args: dict[str, Any],
+    scope: ScopePolicy,
+    corpus_state: CorpusState,
+) -> list[tuple[str, bool]]:
+    """Preconditions for ``raw.http``: scope + method gating.
+
+    The builtin's own implementation re-checks these at call time
+    (defence in depth), but stating them here lets the consistency
+    layer reject the action *before* it dispatches — same Z3-prune
+    flow as every other tool's preconditions.
+    """
+    from urllib.parse import urlparse
+
+    out: list[tuple[str, bool]] = []
+    method = str(args.get("method", "")).upper()
+    url = str(args.get("url", ""))
+
+    out.append(
+        (
+            f"raw_http:method_allowed:{method}",
+            method in scope.allowed_methods,
+        )
+    )
+
+    parsed = urlparse(url) if url else None
+    if parsed is None or not parsed.hostname or parsed.scheme not in ("http", "https"):
+        out.append(("raw_http:url_parses", False))
+        return out
+    out.append(("raw_http:url_parses", True))
+
+    host = parsed.hostname
+    tls = parsed.scheme == "https"
+    port = parsed.port if parsed.port is not None else (443 if tls else 80)
+    out.append(
+        (
+            f"raw_http:in_scope:{host}:{port}:tls={tls}",
+            scope.request_in_scope(host, port, tls),
+        )
+    )
+    return out
+
+
 def build_default_registry() -> ToolRegistry:
     """Construct a registry pre-populated with Modus's first-party
     tool specs: the six typed-action builtins plus the recon
@@ -635,6 +750,10 @@ def build_default_registry() -> ToolRegistry:
 from_scope_file`). The default registry is what every
     :class:`~modus.session.ServerSession` starts with before scope-
     file loading.
+
+    Free-mode-only tools (``raw.http`` etc.) are conditionally added
+    when the operator's env opts in — see
+    :func:`builtin_free_mode_tool_specs`.
     """
     registry = ToolRegistry()
     for spec in builtin_typed_action_specs():
@@ -642,6 +761,8 @@ from_scope_file`). The default registry is what every
     for spec in builtin_corpus_tool_specs():
         registry.register(spec)
     for spec in builtin_recon_tool_specs():
+        registry.register(spec)
+    for spec in builtin_free_mode_tool_specs():
         registry.register(spec)
     return registry
 
@@ -656,6 +777,7 @@ __all__ = [
     "ToolSpec",
     "build_default_registry",
     "builtin_corpus_tool_specs",
+    "builtin_free_mode_tool_specs",
     "builtin_recon_tool_specs",
     "builtin_typed_action_specs",
 ]

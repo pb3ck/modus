@@ -86,7 +86,32 @@ export MODUS_MODE=strict
 | Submission-line invariant (no `submit`/`publish`/`post`) | yes | yes |
 | Body excerpt size (LLM context per response) | 4096 chars (head) | 240 chars (tail) |
 | Wrapped scanner tools (nuclei, etc.) | planned | no |
-| Free-form curl tool that bypasses typed actions | planned | no |
+| `raw.http` curl-equivalent builtin | available with opt-in (`MODUS_ALLOW_RAW_HTTP=1`) | no |
+
+### `raw.http` — opt-in curl-equivalence in free mode
+
+The `raw.http` builtin lets the LLM dispatch arbitrary HTTP requests
+when the typed `Request` action's shape isn't enough — multipart
+bodies, unusual content types, multi-step chains where the LLM
+needs to compose the wire format directly. Doubly gated:
+
+1. Mode must be `free`.
+2. Operator must opt in via `MODUS_ALLOW_RAW_HTTP=1`.
+
+Even when registered, the scope perimeter still holds: the URL's
+`(host, port, tls)` triple must be in scope and the method must
+be in `allowed_methods`. The `raw.http` tool has no more reach
+than the typed `Request` action; the difference is only in
+ergonomics for the LLM and operator visibility into the call
+shape.
+
+```bash
+export MODUS_ALLOW_RAW_HTTP=1   # default mode (free) auto-on
+```
+
+Strict mode never registers `raw.http`, regardless of the env
+var — the audit-defensibility property is preserved without
+operator forethought.
 
 ## What this is
 
