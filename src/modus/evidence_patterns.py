@@ -746,17 +746,57 @@ def _request_body(obs: SessionObservation) -> str:
     return _request_payload_field(obs, "request_body")
 
 
+_AUTH_BEARING_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "x-api-key", "x-auth-token", "x-access-token"}
+)
+# Cookie-name patterns that signal an authenticated session, not just
+# any cookie. The 2026-05-09 wp-lab v6 baseline caught the gap: Modus
+# probed ``/wp-login.php`` (which sets ``wordpress_test_cookie`` even
+# on failure to verify the roundtrip), then later probes carried that
+# cookie. ``_is_authenticated_request`` treated them as authenticated
+# and skipped the info-disclosure detectors entirely. Tightening the
+# cookie check to substantive session names fixes that — non-auth
+# cookies (test-cookie probes, CSRF tokens, analytics) no longer trip
+# the gate.
+_AUTH_COOKIE_PATTERNS: tuple[str, ...] = (
+    "wordpress_logged_in_",
+    "wordpress_sec_",
+    "session=",
+    "sessionid=",
+    "_session=",
+    "phpsessid=",
+    "jwt=",
+    "access_token=",
+    "auth_token=",
+    "auth=",
+    "remember_token=",
+    "connect.sid=",
+    "laravel_session=",
+)
+
+
 def _is_authenticated_request(obs: SessionObservation) -> bool:
-    """True if the request carried any auth-bearing header.
+    """True if the request carried a substantive auth-bearing header.
 
     Used to distinguish "we hit this endpoint with a token and got
     200" (expected) from "we hit it unauthenticated and got 200"
     (potential auth_bypass / info_disclosure).
+
+    Auth-bearing means ``Authorization:`` / ``X-API-Key:`` /
+    ``X-Auth-Token:`` / ``X-Access-Token:`` directly, OR a ``Cookie:``
+    header containing one of the substantive session-cookie patterns
+    in :data:`_AUTH_COOKIE_PATTERNS`. Bare cookies (test cookies,
+    CSRF tokens, analytics) do NOT count.
     """
     headers = _request_headers(obs)
-    for k in headers:
-        if k.lower() in ("authorization", "cookie", "x-api-key", "x-auth-token"):
+    for k, v in headers.items():
+        kl = k.lower()
+        if kl in _AUTH_BEARING_HEADERS:
             return True
+        if kl == "cookie":
+            cookie_lc = str(v).lower()
+            if any(pat in cookie_lc for pat in _AUTH_COOKIE_PATTERNS):
+                return True
     return False
 
 
