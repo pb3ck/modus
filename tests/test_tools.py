@@ -137,8 +137,9 @@ class TestDefaultRegistry:
     def test_default_registry_has_typed_action_and_recon_builtins(self) -> None:
         registry = build_default_registry()
         # Six typed-action builtins + one corpus builtin
-        # (corpus.promote_finding) + two recon shell builtins.
-        assert len(registry) == 9
+        # (corpus.promote_finding) + two recon shell builtins +
+        # one auth builtin (auth.wp_login).
+        assert len(registry) == 10
         for name in (
             "probe",
             "request",
@@ -287,8 +288,8 @@ class TestScopeFileToolsBlock:
         scope_data["tools"][0]["name"] = "operator.amass"  # type: ignore[index]
         scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        # Nine default builtins + two operator-declared = eleven.
-        assert len(session.tool_registry) == 11
+        # Ten default builtins + two operator-declared = twelve.
+        assert len(session.tool_registry) == 12
         assert "operator.amass" in session.tool_registry
         assert "files.read" in session.tool_registry
         # The operator-declared ones got the right invocation kind.
@@ -305,9 +306,9 @@ class TestScopeFileToolsBlock:
         scope_path = tmp_path / "scope.json"
         scope_path.write_text(json.dumps(scope_data))
         session = ServerSession.from_scope_file(scope_path)
-        # Nine default builtins (six typed-action + corpus.promote_finding
-        # + amass.enum + nuclei.scan).
-        assert len(session.tool_registry) == 9
+        # Ten default builtins (six typed-action + corpus.promote_finding
+        # + amass.enum + nuclei.scan + auth.wp_login).
+        assert len(session.tool_registry) == 10
 
     def test_scope_file_duplicate_tool_name_rejected(self, tmp_path: Path) -> None:
         # Same name twice in the scope file's tools block —
@@ -518,9 +519,10 @@ class TestServerSessionDefault:
             allowed_assets=frozenset({"target.example.com"}),
         )
         session = ServerSession(scope=scope, llm=None)
-        # Nine default builtins (six typed-action + corpus.promote_finding
-        # + amass.enum + nuclei.scan).
-        assert len(session.tool_registry) == 9
+        # Ten default builtins (six typed-action + corpus.promote_finding
+        # + amass.enum + nuclei.scan + auth.wp_login).
+        assert len(session.tool_registry) == 10
         assert "request" in session.tool_registry
         assert "corpus.promote_finding" in session.tool_registry
+        assert "auth.wp_login" in session.tool_registry
         assert "amass.enum" in session.tool_registry

@@ -742,6 +742,110 @@ def _raw_http_preconditions(
     return out
 
 
+def builtin_auth_tool_specs() -> tuple[ToolSpec, ...]:
+    """Authentication-flow builtin tool specs.
+
+    Always registered (no env-var or mode gate). The operator
+    passes credentials directly via action args; the audit trail
+    captures the login attempt and the resulting cookie jar. Same
+    scope-perimeter enforcement as every other write-side tool.
+
+    Currently one entry: ``auth.wp_login`` — performs the standard
+    WordPress login dance against an in-scope target and returns
+    the authenticated cookie jar so subsequent ``raw.http`` calls
+    can attach the session via a ``Cookie`` header.
+    """
+    return (
+        ToolSpec(
+            name="auth.wp_login",
+            kind="builtin",
+            description=(
+                "WordPress login flow against an in-scope target. "
+                "Posts username + password to ``/wp-login.php`` and "
+                "returns the resulting cookie jar plus a pre-formatted "
+                "``Cookie:`` header value the LLM can drop into a "
+                "subsequent ``raw.http`` call's ``headers`` arg. Use "
+                "this to unlock the authenticated attack surface (any-"
+                "authenticated-user broken-access-control, member-data "
+                "IDOR, role-based capability checks). Args: "
+                "{target, username, password, redirect_to?}. Scope "
+                "perimeter still enforced — target must resolve to an "
+                "in-scope (host, port, tls) triple and POST must be in "
+                "allowed_methods."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Base URL of the WordPress site (e.g. "
+                            "``http://localhost:8090``). The login "
+                            "endpoint is derived as ``target/wp-login.php``."
+                        ),
+                    },
+                    "username": {"type": "string"},
+                    "password": {"type": "string"},
+                    "redirect_to": {
+                        "type": "string",
+                        "description": (
+                            "Optional ``redirect_to`` POST field. "
+                            "Defaults to ``target/wp-admin/``. Use a "
+                            "crafted value to probe for open-redirect "
+                            "on the login flow."
+                        ),
+                    },
+                },
+                "required": ["target", "username", "password"],
+                "additionalProperties": False,
+            },
+            side_effect="active",
+            invocation=BuiltinInvocation(
+                callable_dotted_path="modus.builtins.auth_wp.wp_login",
+            ),
+            preconditions=_wp_login_preconditions,
+        ),
+    )
+
+
+def _wp_login_preconditions(
+    args: dict[str, Any],
+    scope: ScopePolicy,
+    corpus_state: CorpusState,
+) -> list[tuple[str, bool]]:
+    """Preconditions for ``auth.wp_login``: scope + POST gating.
+
+    The builtin re-checks these at call time, but stating them here
+    lets the consistency layer reject the action before dispatch
+    — same Z3-prune flow as every other tool.
+    """
+    from urllib.parse import urlparse
+
+    out: list[tuple[str, bool]] = [
+        (
+            "auth_wp_login:post_allowed",
+            "POST" in scope.allowed_methods,
+        )
+    ]
+    target = str(args.get("target", ""))
+    parsed = urlparse(target) if target else None
+    if parsed is None or not parsed.hostname or parsed.scheme not in ("http", "https"):
+        out.append(("auth_wp_login:target_parses", False))
+        return out
+    out.append(("auth_wp_login:target_parses", True))
+
+    host = parsed.hostname
+    tls = parsed.scheme == "https"
+    port = parsed.port if parsed.port is not None else (443 if tls else 80)
+    out.append(
+        (
+            f"auth_wp_login:in_scope:{host}:{port}:tls={tls}",
+            scope.request_in_scope(host, port, tls),
+        )
+    )
+    return out
+
+
 def build_default_registry() -> ToolRegistry:
     """Construct a registry pre-populated with Modus's first-party
     tool specs: the six typed-action builtins plus the recon
@@ -764,6 +868,8 @@ from_scope_file`). The default registry is what every
         registry.register(spec)
     for spec in builtin_recon_tool_specs():
         registry.register(spec)
+    for spec in builtin_auth_tool_specs():
+        registry.register(spec)
     for spec in builtin_free_mode_tool_specs():
         registry.register(spec)
     return registry
@@ -778,6 +884,7 @@ __all__ = [
     "ToolRegistry",
     "ToolSpec",
     "build_default_registry",
+    "builtin_auth_tool_specs",
     "builtin_corpus_tool_specs",
     "builtin_free_mode_tool_specs",
     "builtin_recon_tool_specs",
