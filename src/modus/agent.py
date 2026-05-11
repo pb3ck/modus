@@ -275,6 +275,17 @@ class AgentLoop:
         # promote proposal for — single-fire so we don't spam the
         # ranking layer with duplicates.
         synthesized_promotion_ids: set[str] = set()
+        # Issue #39 — URL-keyed detector dedup. The
+        # ``(bug_class, observation_id)`` dedup in ``hypothesized_pairs``
+        # doesn't catch re-probes of the same path: each re-probe
+        # produces a NEW observation_id, the detector fires on the
+        # new observation, the pair set doesn't recognise it as a
+        # dup. Result: N Candidates of the same shape for the same
+        # path. Track ``(bug_class, detector, normalized_url)`` so
+        # ``user_object_dump`` on ``/wp-json/wp/v2/users`` fires
+        # once per run regardless of how many times the LLM
+        # re-probes that path.
+        seen_detector_urls: set[tuple[str, str, str]] = set()
 
         # Issue #38 — mining sub-agent. Pumps Quarry's analytical
         # surface (analyze_regression / _interesting / _jsdelta plus
@@ -322,6 +333,7 @@ class AgentLoop:
                 synthesized_promotion_ids=synthesized_promotion_ids,
                 run_observation_ids=frozenset(run_observations),
                 hypothesized_pairs=hypothesized_pairs,
+                seen_detector_urls=seen_detector_urls,
             )
             # Prepend fallbacks so they win the "first novel survivor"
             # ranking when both fire — the fallback only emits when the
@@ -602,6 +614,7 @@ class AgentLoop:
         synthesized_promotion_ids: set[str],
         run_observation_ids: frozenset[str],
         hypothesized_pairs: set[tuple[str, str]],
+        seen_detector_urls: set[tuple[str, str, str]],
     ) -> list[Action]:
         """Synthesize fallback proposals when the LLM keeps abdicating.
 
@@ -667,6 +680,15 @@ class AgentLoop:
         observations = self._this_run_observations(run_observation_ids)
         if not observations:
             return out
+        # Build observation-id → normalized-url lookup so the
+        # URL-keyed dedup (issue #39) can check whether the detector
+        # already fired against the same path on a prior observation.
+        obs_url_by_id: dict[str, str] = {}
+        for obs in observations:
+            payload = obs.payload if isinstance(obs.payload, dict) else {}
+            url = payload.get("url")
+            if isinstance(url, str) and url:
+                obs_url_by_id[obs.id] = _normalize_url_for_dedup(url)
         matches = detect_evidence_patterns(observations, bug_classes)
         for m in matches:
             key = f"{m.bug_class}:{','.join(sorted(m.evidence_refs))}"
@@ -680,7 +702,22 @@ class AgentLoop:
             # a different ``synthesized_keys`` string. Now blocked.
             if all((m.bug_class, ref) in hypothesized_pairs for ref in m.evidence_refs):
                 continue
+            # Issue #39 — URL-keyed dedup. Suppress when EVERY ref
+            # this fallback would cite resolves to a URL that has
+            # already been hypothesized with the same (bug_class,
+            # detector). Re-probing /wp-json/wp/v2/users produces a
+            # new observation_id; without this gate, the detector
+            # re-fires on the new id and auto-promotes a second
+            # Finding for the same path.
+            match_url_keys = {
+                (m.bug_class, m.detector, obs_url_by_id[ref])
+                for ref in m.evidence_refs
+                if ref in obs_url_by_id
+            }
+            if match_url_keys and match_url_keys.issubset(seen_detector_urls):
+                continue
             synthesized_keys.add(key)
+            seen_detector_urls.update(match_url_keys)
             for ref in m.evidence_refs:
                 hypothesized_pairs.add((m.bug_class, ref))
             try:
@@ -808,6 +845,34 @@ class AgentLoop:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _normalize_url_for_dedup(url: str) -> str:
+    """Canonicalise a URL for detector dedup (issue #39).
+
+    Strip the query string, the fragment, and any trailing slash on
+    the path. Lowercase the scheme + host. Keep the port. Result is
+    a stable shape so that ``/wp-json/wp/v2/users``,
+    ``/wp-json/wp/v2/users/``, and ``/wp-json/wp/v2/users?foo=bar``
+    all dedupe to the same key.
+    """
+    if not isinstance(url, str) or not url:
+        return ""
+    # Strip query + fragment.
+    base = url.split("?", 1)[0].split("#", 1)[0]
+    # Split into scheme/host/path, lowercase the scheme + host.
+    if "://" in base:
+        scheme, rest = base.split("://", 1)
+        if "/" in rest:
+            netloc, path = rest.split("/", 1)
+            path = "/" + path
+        else:
+            netloc, path = rest, ""
+        base = f"{scheme.lower()}://{netloc.lower()}{path}"
+    # Strip trailing slash on non-root paths.
+    if base.endswith("/") and base.count("/") > 3:
+        base = base[:-1]
+    return base
 
 
 def _extract_observed_hosts(observations: list[SessionObservation]) -> frozenset[str]:

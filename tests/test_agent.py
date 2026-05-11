@@ -522,6 +522,97 @@ class TestFallbackProposer:
         )
         assert hypothesizes[0] is llm_hypothesis or hypothesizes[0].evidence_refs == (seed_id,)
 
+    async def test_fallback_deduped_on_url_across_reprobes(self) -> None:
+        """Issue #39: re-probing the same path keeps producing new
+        observation IDs, the fallback detector fires on each one, and
+        without URL-keyed dedup the operator gets N duplicate Findings
+        for the same logical asset.
+
+        Reproduce: seed three distinct observations all targeting the
+        SAME URL with the SAME version-banner shape (different obs_ids
+        but the same path). The fallback must emit exactly ONE
+        hypothesize against this URL, not three.
+        """
+        from modus.session import SessionObservation
+
+        scope = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            allowed_methods=frozenset({"GET"}),
+        )
+        session = ServerSession(scope=scope, llm=None)
+        seed_ids = ["obs-reprobe-1", "obs-reprobe-2", "obs-reprobe-3"]
+        for sid in seed_ids:
+            session.observations.append(
+                SessionObservation(
+                    id=sid,
+                    kind="request",
+                    payload={
+                        "url": "http://target.example.com/api/version",
+                        "status": 200,
+                        "response_body": '{"version":"1.2.3"}',
+                        "request_headers": {},
+                    },
+                )
+            )
+        proposer = FixedProposer([Probe(target="target.example.com")] * 20)
+        executor = _RecordingExecutor()
+        loop = AgentLoop(
+            proposer=proposer,
+            checker=ConsistencyChecker(),
+            session=session,
+            execute_action=executor,
+            budget=Budget(max_steps=10, max_consecutive_empty_steps=20),
+        )
+        await loop.run(
+            target_name="demo",
+            bug_classes=["info_disclosure"],
+            initial_observation_ids=frozenset(seed_ids),
+        )
+        hypothesizes = [a for a in executor.calls if a.kind == "hypothesize"]
+        # Exactly one fallback hypothesize despite three matching
+        # observations on the same URL. Pre-fix this would have been
+        # 3 (one per observation_id).
+        assert len(hypothesizes) == 1, (
+            f"URL dedup missed: got {len(hypothesizes)} hypothesizes for "
+            f"three re-probes of the same path; expected 1"
+        )
+
+    def test_normalize_url_for_dedup_canonicalises_consistently(self) -> None:
+        """Issue #39 — direct test of the URL canonicalisation helper.
+
+        The dedup key uses the canonical form so query-string variants
+        of the same path collapse. The pre-existing
+        ``synthesized_keys`` mechanism already prevents two emitted
+        matches on different URLs from both executing in the same
+        run (separate bug), so end-to-end testing of "distinct URLs
+        both fire" requires fixing that first. This unit-level
+        coverage pins the canonicalisation behaviour.
+        """
+        from modus.agent import _normalize_url_for_dedup
+
+        # Same logical URL, different shapes → same canonical form.
+        canonical = "http://target.example.com/wp-json/wp/v2/users"
+        for variant in (
+            "http://target.example.com/wp-json/wp/v2/users",
+            "http://target.example.com/wp-json/wp/v2/users/",
+            "http://target.example.com/wp-json/wp/v2/users?foo=bar",
+            "http://target.example.com/wp-json/wp/v2/users#frag",
+            "HTTP://Target.Example.COM/wp-json/wp/v2/users",
+        ):
+            assert _normalize_url_for_dedup(variant) == canonical, (
+                f"variant {variant!r} did not canonicalise to {canonical!r}"
+            )
+
+        # Different logical paths → different canonical forms.
+        a = _normalize_url_for_dedup("http://a.example.com/api/version")
+        b = _normalize_url_for_dedup("http://b.example.com/api/version")
+        assert a != b
+        # Different ports → different canonical forms.
+        assert _normalize_url_for_dedup(
+            "http://x.example.com:8080/path"
+        ) != _normalize_url_for_dedup("http://x.example.com:9090/path")
+
     async def test_seed_from_corpus_loads_response_artifacts(self) -> None:
         """When ``seed_from_corpus=True`` (the default), the loop
         calls ``list_response_artifacts`` on session.with_quarry()
