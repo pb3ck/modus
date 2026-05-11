@@ -75,3 +75,19 @@ modus-runs/
 
 # Build artifacts that aren't covered above
 *.log
+
+# Bug-bounty / vulnerability disclosure drafts.
+#
+# The reports/ directory holds operator-authored disclosure drafts
+# for active engagements. These describe specific, often UNPATCHED
+# vulnerabilities in third-party software. Committing them to the
+# public repo before the operator submits to the relevant bounty
+# programme is a 0-day disclosure — it pre-discloses a live
+# vulnerability, violates virtually every bug-bounty programme's
+# coordinated-disclosure rules, and forfeits any payout. This
+# ignore is load-bearing: keep it.
+#
+# If the operator wants to publish a report AFTER disclosure +
+# patch release, they can move it out of reports/ or force-add it
+# explicitly. The default must be "never committed."
+reports/
