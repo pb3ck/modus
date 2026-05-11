@@ -1,6 +1,6 @@
 [project]
 name = "modus"
-version = "0.4.0"
+version = "0.5.0"
 description = "Autonomous offensive agent with an open tool registry, formal consistency checking, and a Quarry-backed corpus."
 readme = "README.md"
 requires-python = ">=3.12"

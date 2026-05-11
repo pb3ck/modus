@@ -10,6 +10,121 @@ notice.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-11
+
+The "actually pump Quarry + close the FP firehose + reach the
+authenticated surface" release. Twelve commits over a two-day
+session arc against the Wordfence Bug Bounty Program identified
+specific architectural gaps; 0.5.0 closes them all. **0 bounty-
+payable findings shipped during this arc** (modern WordPress
+plugins at their current versions are well-hardened against
+direct HTTP probing) — the value is in the architecture, not the
+hunt outcome.
+
+The four ADR-0001 invariants still hold under all 0.5 additions:
+typed actions, formal Z3 consistency check, Quarry-backed corpus,
+storage-enforced submission line.
+
+### Added
+
+- **Mining sub-agent (#38)**. The autonomous loop now actively
+  pumps every Quarry analytical / retrieval surface — seven of
+  them: ``analyze_regression``, ``analyze_interesting``,
+  ``analyze_jsdelta``, ``recall``, ``coverage``, ``search``,
+  ``diff``. Synchronous pass every ``mining_cadence`` steps
+  (default 5). Mined Candidates flow into the next step's
+  ``StepContext.mining_signals`` and surface as a markdown block
+  in the proposer's user prompt — the LLM can pivot to re-probe
+  flagged assets and emit fresh ``Hypothesize`` actions citing
+  this-run evidence_refs. Per-run isolation preserved.
+  ``coverage`` and ``diff`` are most useful when the operator
+  pre-ingests recon into Quarry before launching the audit.
+- **Quarry fail-fast on session start (#37).** The autonomous
+  loop probes Quarry with a read-only ``list_targets`` call before
+  the first step and refuses to start if the corpus isn't
+  initialised. Closes the silent-degradation gap where Candidates
+  surfaced in the result JSON with ``persistence_error`` rows but
+  never landed in Quarry. Per-callsite soft-fail stays for
+  narrower failures (older Quarry without specific tools).
+- **Dynamic plugin-nonce extraction (token extractor).** Two new
+  curated patterns — ``plugin_nonce_form`` and ``plugin_nonce_json``
+  — capture the full field name as the token name, surfacing every
+  plugin's ``<slug>_*_nonce`` field shape (``swpm_registration_nonce``,
+  ``user_registration_profile_picture_remove_nonce``,
+  ``forminator_nonce``, ``wpcode_nonce``, etc.) without enumerating
+  the slug list. Anchored on 10-hex-char WP nonce values so non-WP
+  shapes don't false-positive.
+- **``raw.http`` builtin under operator opt-in.** Free-mode +
+  ``MODUS_ALLOW_RAW_HTTP=1``. Doubly-gated curl-equivalence for
+  the LLM. Scope perimeter (host:port:tls + method) still enforced.
+- **``auth.wp_login`` builtin.** Performs the WordPress login flow
+  and returns the authenticated cookie jar plus a pre-formatted
+  ``Cookie`` header value the LLM can drop into a subsequent
+  ``raw.http`` call. Unlocks the authenticated attack surface —
+  any-authenticated-user broken access control is historically
+  the most common Wordfence-payable shape.
+- **Source-review augmentation (``modus.source_review``).** Greps
+  a plugin's PHP for 12 curated high-signal patterns across five
+  bug classes (``wp_ajax_nopriv_*`` unauth handlers,
+  ``permission_callback => __return_true``, ``unserialize($_*)``,
+  raw ``$wpdb->query`` with user input, ``eval(``, ``include`` with
+  user input, hardcoded credentials, ``update_user_meta`` privesc,
+  open-redirect via ``wp_redirect``, etc.). Emits a JSONL stream in
+  Quarry's ``responses`` adapter shape; the operator ingests it
+  pre-audit and mining's ``search`` surfaces the matches.
+  Operator workflow:
+  ``python -m modus.source_review --plugin-dir <path> --slug <slug>
+  --output <file>``.
+- **``free`` / ``strict`` operating modes** (``MODUS_MODE``).
+  ``free`` is the default and gives the LLM 4 KB body excerpts
+  (head, not tail) plus opt-in scanner/curl tools. ``strict``
+  preserves the v0.1 240-char tail-only excerpt and refuses to
+  register ``raw.http`` regardless of the env var — for
+  audit-defensible methodology.
+- **ToolRegistry rendered into the LLM system prompt.**
+  Operator-declared and free-mode-only tools surface by name in
+  the proposer's prompt. Confirmed empirically: ``raw.http`` went
+  from 0 invocations pre-fix to 5 in the next audit run.
+- **``Differential`` action accepts ``bug_class="sqli"`` +
+  ``dimension="payload"``.** Caught during the CVE-2022-25148
+  calibration: the LLM correctly tried to construct a SQLi
+  time-based oracle (``SLEEP(5)`` vs baseline) and the Literal
+  rejected it. Now valid.
+- **``ScopePolicy.scope_intent`` + ``plugin_slug`` (#40).** When
+  ``scope_intent='plugin'``, the deterministic detector library
+  suppresses WordPress-core paths (``/wp-json/wp/v2/*``) and
+  non-target-plugin readmes — they're not plugin-attributable and
+  Wordfence's program excludes them. Default ``general`` is
+  unchanged behaviour.
+- **URL-keyed detector dedup (#39).** ``hypothesized_pairs`` keys
+  on ``(bug_class, observation_id)``; re-probing the same path
+  produces a new observation_id and the detector re-fires. New
+  ``seen_detector_urls`` set keys on ``(bug_class, detector,
+  normalized_url)`` so re-probes of the same path collapse.
+
+### Fixed
+
+- ``Differential`` schema rejected SQLi-shape oracles. Now
+  accepts the natural payload-driven shape.
+- Plugin-nonce field names weren't extracted, blocking
+  authenticated chains against nonce-protected AJAX/REST.
+- Quarry's analytical surface sat dormant; the LLM was left to
+  remember it exists.
+
+### Calibration / verification
+
+- Detection-path end-to-end calibration against **CVE-2022-25148
+  (wp-statistics 13.1.4 SQLi)** produced 3 distinct critical
+  Candidates, all auto-promoted to Finding rows in Quarry. The
+  registry-escalation path (readme.txt fingerprint → CVE registry
+  lookup → bug_class/severity upgrade) is empirically verified.
+
+### Two new issues filed
+
+- **#39 (URL-keyed detector dedup)** — fixed in this release.
+- **#40 (scope_intent='plugin' WP-core suppression)** — fixed in
+  this release.
+
 ## [0.4.0] — 2026-05-08
 
 First non-pre-release tag. **Modus's autonomous loop closes the

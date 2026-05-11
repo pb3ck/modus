@@ -29,14 +29,18 @@ performed outside Modus.
 > **Status: 0.5.0 (early release).** The autonomous loop runs
 > end-to-end against authorized targets *and* closes the
 > Candidate→Finding lifecycle inside the run — see
-> [`docs/quickstart.md`](./docs/quickstart.md). The 0.5 line adds
+> [`docs/quickstart.md`](./docs/quickstart.md). The 0.5 line adds:
 > a mining sub-agent that pumps Quarry's analytical and retrieval
-> surfaces during the autonomous loop (no longer waiting for the
-> LLM to remember `analyze_*` exists), a fail-fast probe at
-> session start that refuses to run against an uninitialised
-> corpus, and ToolRegistry-aware system-prompt rendering so
-> operator-declared tools are visible to the LLM by name. The
-> action vocabulary (open `ToolRegistry` per ADR-0004), the formal
+> surfaces during the autonomous loop; fail-fast on missing
+> corpus; ToolRegistry visible to the LLM; the `auth.wp_login`
+> builtin that unlocks the authenticated attack surface; the
+> `modus.source_review` augmentation that pre-ingests a plugin's
+> PHP into the corpus so the LLM can pivot on source-side
+> signal; the dynamic plugin-nonce extractor; the `raw.http`
+> opt-in curl-equivalent for free mode; `ScopePolicy.scope_intent`
+> (`plugin` mode suppresses WordPress-core FPs); and URL-keyed
+> detector dedup. See [`CHANGELOG.md`](./CHANGELOG.md) for the
+> full list. The action vocabulary (open `ToolRegistry` per ADR-0004), the formal
 > consistency check, the corpus interface, the submission-line
 > invariant, and the autonomous-session MCP tool surface are
 > committed surfaces; everything else may shift between minor
