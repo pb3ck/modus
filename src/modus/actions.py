@@ -133,11 +133,22 @@ class Compare(_ActionBase):
 class Differential(_ActionBase):
     """Differential test across observations along a single dimension.
 
-    The bug-class oracle for IDOR / auth-bypass shapes: same path,
-    different identity (or no identity), same response shape ⇒
-    something is off. Encodes more structure than a generic
-    :class:`Compare` because the dimension determines what counts
-    as evidence for a given bug class.
+    The bug-class oracle for IDOR / auth-bypass / SQLi shapes:
+
+    * **Identity-class oracles** (``dimension`` in ``identity / auth /
+      role / tenant``) — same path, different caller; same response
+      shape ⇒ access-control bypass. Drives ``idor / auth_bypass /
+      tenant_isolation`` candidates.
+
+    * **Payload-class oracles** (``dimension="payload"``) — same path
+      and caller, different query/body payload; differing response
+      shape OR timing ⇒ the input reaches a sink. Drives ``sqli``
+      candidates via time-based oracle (one observation with
+      ``SLEEP(5)`` measurably slower than baseline) or
+      content-based oracle (UNION SELECT shifts the response). The
+      2026-05-10 CVE-2022-25148 calibration run caught the gap:
+      the LLM tried to construct a SQLi differential and the
+      ``bug_class`` literal rejected it.
 
     Preconditions:
       * Every observation in ``observations`` exists in the corpus.
@@ -146,8 +157,8 @@ class Differential(_ActionBase):
 
     kind: Literal["differential"] = "differential"
     observations: tuple[CorpusRef, ...] = Field(min_length=2, max_length=8)
-    dimension: Literal["identity", "auth", "role", "tenant"]
-    bug_class: Literal["idor", "auth_bypass", "tenant_isolation"]
+    dimension: Literal["identity", "auth", "role", "tenant", "payload"]
+    bug_class: Literal["idor", "auth_bypass", "tenant_isolation", "sqli"]
 
 
 class Annotate(_ActionBase):

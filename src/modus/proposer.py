@@ -156,9 +156,16 @@ discriminator:
   observation.
 - ``compare(observation_a, observation_b, dimensions)`` — diff two \
   existing observations along the named dimensions.
-- ``differential(observations, dimension=identity|auth|role|tenant, \
-  bug_class=idor|auth_bypass|tenant_isolation)`` — bug-class oracle \
-  across observations.
+- ``differential(observations, dimension=identity|auth|role|tenant|payload, \
+  bug_class=idor|auth_bypass|tenant_isolation|sqli)`` — bug-class \
+  oracle across observations. Identity-class dimensions \
+  (identity/auth/role/tenant) drive idor/auth_bypass/tenant_isolation \
+  candidates from same-path-different-caller comparisons. The \
+  ``payload`` dimension drives ``sqli`` candidates from \
+  same-caller-different-payload comparisons — measurable timing \
+  delta (``SLEEP(5)`` payload vs baseline) is a time-based oracle; \
+  structural response delta (``UNION SELECT`` payload vs baseline) \
+  is a content-based oracle.
 - ``annotate(referent, note)`` — attach an FTS-indexed note to a \
   corpus row.
 - ``tool(name, args)`` — invoke a registered tool by name with \

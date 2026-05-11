@@ -380,8 +380,10 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
             kind="builtin",
             description=(
                 "Differential test across observations along a single "
-                "dimension (identity / auth / role / tenant) for a given "
-                "bug class (idor / auth_bypass / tenant_isolation)."
+                "dimension. Identity-class dimensions (identity / auth / "
+                "role / tenant) for idor / auth_bypass / tenant_isolation "
+                "candidates; payload-class dimension (payload) for sqli "
+                "candidates via time-based or content-based oracle."
             ),
             args_schema={
                 "type": "object",
@@ -393,11 +395,11 @@ def builtin_typed_action_specs() -> tuple[ToolSpec, ...]:
                     },
                     "dimension": {
                         "type": "string",
-                        "enum": ["identity", "auth", "role", "tenant"],
+                        "enum": ["identity", "auth", "role", "tenant", "payload"],
                     },
                     "bug_class": {
                         "type": "string",
-                        "enum": ["idor", "auth_bypass", "tenant_isolation"],
+                        "enum": ["idor", "auth_bypass", "tenant_isolation", "sqli"],
                     },
                 },
                 "required": ["observations", "dimension", "bug_class"],

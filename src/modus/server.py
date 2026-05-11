@@ -93,10 +93,13 @@ _ACTION_TOOL_DESCRIPTIONS: dict[str, str] = {
         "must exist and be distinct."
     ),
     "differential": (
-        "Differential test across observations along a single dimension "
-        "(identity / auth / role / tenant) for a given bug class "
-        "(idor / auth_bypass / tenant_isolation). Verified by the "
-        "consistency layer: every observation must exist."
+        "Differential test across observations along a single dimension. "
+        "Identity-class dimensions (identity / auth / role / tenant) drive "
+        "idor / auth_bypass / tenant_isolation candidates from "
+        "same-path-different-caller comparisons. The ``payload`` dimension "
+        "drives sqli candidates from same-caller-different-payload "
+        "comparisons (time-based or content-based oracle). Verified by "
+        "the consistency layer: every observation must exist."
     ),
     "annotate": (
         "Attach an operator-visible note to a corpus referent (target, "

@@ -111,6 +111,33 @@ class TestDifferential:
                 bug_class="idor",
             )
 
+    def test_payload_dimension_with_sqli_bug_class(self) -> None:
+        # 2026-05-10 CVE-2022-25148 calibration caught the schema
+        # gap: the LLM tried to construct a differential for SQLi
+        # time-based oracle (payload-class comparison) and the
+        # bug_class literal rejected it. ``payload`` dimension paired
+        # with ``sqli`` bug class is now valid — drives SQLi
+        # detection via time-based oracle (SLEEP payload vs baseline)
+        # or content-based oracle (UNION SELECT payload vs baseline).
+        action = Differential(
+            observations=("obs-baseline", "obs-sleep-payload"),
+            dimension="payload",
+            bug_class="sqli",
+        )
+        assert action.dimension == "payload"
+        assert action.bug_class == "sqli"
+
+    def test_identity_dimension_still_valid_with_idor(self) -> None:
+        # Regression guard: extending the literals must not break
+        # the pre-existing pairings.
+        action = Differential(
+            observations=("obs-1", "obs-2"),
+            dimension="identity",
+            bug_class="idor",
+        )
+        assert action.dimension == "identity"
+        assert action.bug_class == "idor"
+
 
 class TestAnnotate:
     def test_minimal_valid(self) -> None:
