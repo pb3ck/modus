@@ -120,6 +120,84 @@ class TestExtractTokens:
         # value="..."`` context is absent.
         assert "_wpnonce" not in result
 
+    def test_dynamic_pattern_extracts_swpm_registration_nonce(self) -> None:
+        # The 2026-05-10 simple-membership audit observed
+        # ``swpm_registration_nonce`` in form fields and the LLM hit
+        # the validation endpoint with ``nonce=test`` because the
+        # fixed-name patterns didn't catch this plugin-specific
+        # field name. The dynamic plugin-nonce pattern closes it.
+        body = (
+            '<form id="swpm-registration-form" method="post">'
+            '<input name="swpm_registration_nonce" value="b761c3f88e" />'
+            '<input name="user_name" /></form>'
+        )
+        result = extract_tokens([_obs("o1", "http://t/?swpm_login=1", body)])
+        assert "swpm_registration_nonce" in result
+        token = result["swpm_registration_nonce"]
+        assert token.value == "b761c3f88e"
+        assert token.source_observation_id == "o1"
+
+    def test_dynamic_pattern_extracts_user_registration_nonce(self) -> None:
+        # User Registration & Membership uses
+        # ``user_registration_profile_picture_*_nonce``. Same
+        # extractor catches it without enumerating the slug.
+        body = (
+            '<input type="hidden" '
+            'name="user_registration_profile_picture_remove_nonce" '
+            'value="9f8c1a2b34" />'
+        )
+        result = extract_tokens([_obs("o1", "http://t/account/", body)])
+        assert "user_registration_profile_picture_remove_nonce" in result
+        assert result["user_registration_profile_picture_remove_nonce"].value == "9f8c1a2b34"
+
+    def test_dynamic_pattern_extracts_multiple_nonces_from_one_page(self) -> None:
+        # A registration page often emits multiple plugin nonces in
+        # one HTML response. The dynamic pattern must emit one
+        # token per match, not stop after the first.
+        body = (
+            '<input name="swpm_login_nonce" value="aaaaaaaaaa" />'
+            '<input name="swpm_register_nonce" value="bbbbbbbbbb" />'
+        )
+        result = extract_tokens([_obs("o1", "http://t/", body)])
+        assert "swpm_login_nonce" in result
+        assert "swpm_register_nonce" in result
+        assert result["swpm_login_nonce"].value == "aaaaaaaaaa"
+        assert result["swpm_register_nonce"].value == "bbbbbbbbbb"
+
+    def test_dynamic_pattern_extracts_from_json_settings_object(self) -> None:
+        # Plugins sometimes localise their nonce into a JS settings
+        # object via wp_localize_script. The JSON variant catches it.
+        body = (
+            "<script>var swpmSettings = "
+            '{"ajaxurl":"\\/wp-admin\\/admin-ajax.php",'
+            '"swpm_ajax_nonce":"e3a4b1c2d5"};</script>'
+        )
+        result = extract_tokens([_obs("o1", "http://t/", body)])
+        assert "swpm_ajax_nonce" in result
+        assert result["swpm_ajax_nonce"].value == "e3a4b1c2d5"
+
+    def test_dynamic_pattern_does_not_match_non_wp_nonce_values(self) -> None:
+        # Anchored on the 10-hex-char value shape. A field named
+        # ``something_nonce`` with a longer or non-hex value should
+        # NOT match — those aren't WP-shape nonces and embedding
+        # them would corrupt the request.
+        body_too_long = '<input name="custom_nonce" value="abcdef1234567890" />'
+        body_non_hex = '<input name="custom_nonce" value="HELLOWORLD" />'
+        assert "custom_nonce" not in extract_tokens([_obs("o1", "http://t/", body_too_long)])
+        assert "custom_nonce" not in extract_tokens([_obs("o2", "http://t/", body_non_hex)])
+
+    def test_dynamic_pattern_does_not_collide_with_fixed_wp_rest_nonce(self) -> None:
+        # ``wp_rest_nonce`` is a fixed-name pattern, but
+        # ``"nonce": "..."`` shape would NOT be caught by the
+        # dynamic JSON pattern (it requires a trailing ``_nonce``
+        # suffix on the key). Verify they don't fight over the same
+        # JSON shape.
+        body = '<script>var wpApiSettings = {"nonce":"f7e228919c"};</script>'
+        result = extract_tokens([_obs("o1", "http://t/", body)])
+        assert "wp_rest_nonce" in result
+        # No collision-prefix name extracted from this shape.
+        assert not any(k.endswith("_nonce") and k != "wp_rest_nonce" for k in result)
+
     def test_custom_pattern_set(self) -> None:
         # Operator can pass their own pattern set if they want to test
         # a custom token shape.
@@ -141,20 +219,37 @@ class TestDefaultPatternCatalog:
     def test_all_patterns_have_required_fields(self) -> None:
         # Sanity check on the curated pattern set. A misconfigured
         # entry (empty regex, missing capture group) would crash at
-        # extract_tokens time.
+        # extract_tokens time. Fixed-name patterns must have exactly
+        # one capture group; dynamic-name patterns must have two
+        # named groups (``name`` and ``value``).
         for pattern in DEFAULT_PATTERNS:
             assert pattern.name
             assert pattern.description.strip()
-            # Every pattern must have exactly one capture group.
-            assert pattern.pattern.groups == 1, (
-                f"pattern {pattern.name!r} must have exactly one capture group"
-            )
+            if pattern.dynamic_name:
+                assert pattern.pattern.groups == 2, (
+                    f"dynamic pattern {pattern.name!r} must have two capture groups"
+                )
+                group_names = set(pattern.pattern.groupindex)
+                assert {"name", "value"}.issubset(group_names), (
+                    f"dynamic pattern {pattern.name!r} must have named groups "
+                    f"'name' and 'value' (got {group_names!r})"
+                )
+            else:
+                assert pattern.pattern.groups == 1, (
+                    f"pattern {pattern.name!r} must have exactly one capture group"
+                )
 
     def test_canonical_token_names_present(self) -> None:
         # The names referenced in ADR 0007 + the WP-flow design must
         # be in the catalog.
         names = {p.name for p in DEFAULT_PATTERNS}
-        for required in ("_wpnonce", "wp_rest_nonce", "csrf_token"):
+        for required in (
+            "_wpnonce",
+            "wp_rest_nonce",
+            "csrf_token",
+            "plugin_nonce_form",
+            "plugin_nonce_json",
+        ):
             assert required in names, f"DEFAULT_PATTERNS missing {required!r}"
 
 

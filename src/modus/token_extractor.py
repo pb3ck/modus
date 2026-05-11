@@ -39,24 +39,48 @@ if TYPE_CHECKING:
 class ExtractorPattern:
     """One curated regex pattern that extracts a named token.
 
-    The regex MUST have exactly one capture group containing the
-    token value. The surrounding regex anchors the context so the
-    detector doesn't match arbitrary strings of the right shape.
+    Two shapes are supported:
+
+    * **Fixed-name** (default): the regex has exactly one capture
+      group containing the token value. The :attr:`name` field is
+      the canonical token name and surfaces in the proposer's
+      prompt verbatim. Use this for tokens with a single
+      well-known name (``_wpnonce``, ``X-WP-Nonce``, etc.).
+
+    * **Dynamic-name** (``dynamic_name=True``): the regex has two
+      *named* capture groups, ``(?P<name>...)`` and
+      ``(?P<value>...)``. Each match emits a separate
+      :class:`ExtractedToken` whose ``name`` is the captured name
+      group. Use this for whole *families* of tokens that share a
+      shape — e.g. WordPress plugin-specific nonces, where every
+      plugin emits ``<slug>_<context>_nonce`` form fields and we
+      want to harvest each one without enumerating the slug list.
     """
 
     name: str
-    """Canonical token name. Used as the key in
+    """Canonical token name (fixed-name mode) or fallback name
+    (dynamic-name mode, used when the regex doesn't capture a
+    ``name`` group). Used as the key in
     :attr:`StepContext.extracted_tokens` and in the proposer's
     "available tokens" prompt block. Stable across runs so the LLM
     can learn to reference specific names."""
 
     pattern: re.Pattern[str]
-    """Compiled regex. Single capture group = the token value."""
+    """Compiled regex. In fixed-name mode: one capture group = the
+    token value. In dynamic-name mode: two named groups
+    ``(?P<name>)`` and ``(?P<value>)``."""
 
     description: str
     """One-line operator-readable description of what this token
     is for. Renders in the proposer's prompt block so the LLM
     knows when to use which token."""
+
+    dynamic_name: bool = False
+    """When True, :attr:`pattern` is expected to have named groups
+    ``name`` and ``value``; one :class:`ExtractedToken` is emitted
+    per match using the captured name. When False (default), the
+    pattern is treated as fixed-name with a single value-capture
+    group."""
 
 
 @dataclass(frozen=True)
@@ -140,6 +164,51 @@ DEFAULT_PATTERNS: tuple[ExtractorPattern, ...] = (
             "in subsequent form POSTs against the same host."
         ),
     ),
+    # WordPress plugin-specific nonces (form-field shape). Captures
+    # the FULL field name so the LLM embeds it under the correct
+    # parameter. Covers every plugin's ``<slug>_<context>_nonce``
+    # without enumerating the slug list — observed shapes include
+    # ``swpm_registration_nonce`` (Simple Membership),
+    # ``user_registration_profile_picture_nonce`` (User Registration
+    # & Membership), ``forminator_nonce``, ``wpcode_nonce``, etc.
+    # Anchored on the 10-hex-char value so it doesn't match arbitrary
+    # ``_nonce``-named fields with non-WP-shaped values. 2026-05-10
+    # simple-membership audit (wpcode/swpm iterations) caught the
+    # gap: the LLM hit nonce-protected endpoints with ``test`` as
+    # the nonce because the form-field name didn't match the
+    # single-name ``_wpnonce`` pattern.
+    ExtractorPattern(
+        name="plugin_nonce_form",
+        pattern=re.compile(
+            r'name=["\'](?P<name>[a-zA-Z][\w]*_nonce)["\']'
+            r'\s+value=["\'](?P<value>[a-f0-9]{10})["\']'
+        ),
+        description=(
+            "WordPress plugin-specific CSRF nonce form field "
+            "(``<plugin>_<context>_nonce``, 10 hex chars). Embed "
+            "under the captured field name in form-encoded POSTs to "
+            "the plugin's submission endpoints. Common shapes: "
+            "``swpm_registration_nonce``, "
+            "``user_registration_*_nonce``, ``forminator_nonce``."
+        ),
+        dynamic_name=True,
+    ),
+    # WordPress plugin-specific nonces (JSON-key shape). Same name
+    # family, surfaced when the plugin embeds the nonce in a
+    # JS-settings object via ``wp_localize_script()`` rather than a
+    # hidden form field. Companion to ``plugin_nonce_form``.
+    ExtractorPattern(
+        name="plugin_nonce_json",
+        pattern=re.compile(r'"(?P<name>[a-zA-Z][\w]*_nonce)"\s*:\s*"(?P<value>[a-f0-9]{10})"'),
+        description=(
+            "WordPress plugin-specific CSRF nonce JSON key "
+            "(``<plugin>_<context>_nonce``, 10 hex chars). Embed "
+            "either as a header (e.g. ``X-WP-Nonce`` for REST) or "
+            "as a body field under the captured key for AJAX POSTs. "
+            "Common shapes match the form-field variant."
+        ),
+        dynamic_name=True,
+    ),
 )
 
 
@@ -166,21 +235,45 @@ def extract_tokens(
             continue
         url = str(payload.get("url", ""))
         for pattern in patterns:
+            if pattern.dynamic_name:
+                # Iterate every match so one observation can yield
+                # multiple tokens (a registration page commonly has
+                # both ``swpm_login_nonce`` and ``swpm_register_nonce``).
+                for match in pattern.pattern.finditer(body):
+                    resolved = match.group("name")
+                    if not resolved or resolved in seen_names:
+                        continue
+                    value = match.group("value")
+                    if not value:
+                        continue
+                    seen_names.add(resolved)
+                    out[resolved] = ExtractedToken(
+                        name=resolved,
+                        value=value,
+                        source_observation_id=obs.id,
+                        source_url=url,
+                        extracted_at=datetime.now(UTC),
+                    )
+                continue
+            # Fixed-name path: at most one extraction per pattern.
             if pattern.name in seen_names:
                 continue
-            match = pattern.pattern.search(body)
-            if match is None:
+            fixed_match = pattern.pattern.search(body)
+            if fixed_match is None:
                 continue
             seen_names.add(pattern.name)
             out[pattern.name] = ExtractedToken(
                 name=pattern.name,
-                value=match.group(1),
+                value=fixed_match.group(1),
                 source_observation_id=obs.id,
                 source_url=url,
                 extracted_at=datetime.now(UTC),
             )
-        if len(seen_names) == len(patterns):
-            break
+        # No early-exit: dynamic patterns can keep harvesting names
+        # we haven't seen yet on later observations (a page from
+        # step 3 may emit nonces the latest page doesn't). Per-name
+        # dedup via ``seen_names`` ensures the freshest wins, and
+        # the observation count for any audit run is bounded.
     return out
 
 
