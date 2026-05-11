@@ -689,7 +689,17 @@ class AgentLoop:
             url = payload.get("url")
             if isinstance(url, str) and url:
                 obs_url_by_id[obs.id] = _normalize_url_for_dedup(url)
-        matches = detect_evidence_patterns(observations, bug_classes)
+        # Issue #40 — plugin-scope FP suppression. When the operator's
+        # scope file declares ``scope_intent="plugin"``, WordPress-core
+        # paths (/wp-json/wp/v2/*) and non-target-plugin readmes drop
+        # out of the match set before the dedup gates run.
+        scope = self.session.scope
+        matches = detect_evidence_patterns(
+            observations,
+            bug_classes,
+            scope_intent=getattr(scope, "scope_intent", "general"),
+            plugin_slug=getattr(scope, "plugin_slug", None),
+        )
         for m in matches:
             key = f"{m.bug_class}:{','.join(sorted(m.evidence_refs))}"
             if key in synthesized_keys:

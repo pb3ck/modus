@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from modus import __version__
 
@@ -397,6 +397,24 @@ class ScopePolicy(BaseModel):
     :attr:`~modus.session.ServerSession.tool_registry` is built
     by registering these on top of the default registry of
     builtins."""
+    scope_intent: Literal["general", "plugin"] = "general"
+    """Issue #40: tags the engagement's intent so the detector
+    library can adjust its FP suppression. ``general`` (default)
+    audits arbitrary WordPress sites — every HTTP-observable
+    finding is in-scope, including WordPress-core surface like
+    ``/wp-json/wp/v2/users``. ``plugin`` narrows the scope to a
+    single plugin's code: WordPress-core paths are suppressed
+    because they aren't plugin-attributable and the operator
+    can't ""patch"" core's behaviour via a plugin bounty
+    submission. Set ``plugin_slug`` alongside this when
+    ``scope_intent='plugin'``."""
+    plugin_slug: str | None = None
+    """Issue #40: the plugin's wp.org slug when
+    ``scope_intent='plugin'``. Used to scope the
+    ``plugin_version_disclosure`` detector to the target plugin's
+    readme — every site has akismet/wordfence/jetpack readmes
+    too, and detecting those as findings has zero bounty value.
+    Required when ``scope_intent='plugin'``; ignored otherwise."""
 
     @field_validator("allowed_assets")
     @classmethod
@@ -415,6 +433,18 @@ class ScopePolicy(BaseModel):
         if unknown:
             raise ValueError(f"unknown HTTP method(s) in scope: {sorted(unknown)}")
         return value
+
+    @model_validator(mode="after")
+    def _plugin_intent_requires_slug(self) -> ScopePolicy:
+        """Issue #40: ``scope_intent='plugin'`` must name the plugin."""
+        if self.scope_intent == "plugin" and not self.plugin_slug:
+            raise ValueError(
+                "scope_intent='plugin' requires plugin_slug to be set "
+                "(the target plugin's wp.org slug). Without it, the "
+                "detector library can't distinguish the target's readme "
+                "from every other installed plugin's readme."
+            )
+        return self
 
     @field_validator("scope_wildcards")
     @classmethod

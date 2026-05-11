@@ -1638,6 +1638,9 @@ _DETECTORS = {
 def detect_evidence_patterns(
     observations: list[SessionObservation],
     bug_classes: tuple[str, ...] = (),
+    *,
+    scope_intent: str = "general",
+    plugin_slug: str | None = None,
 ) -> list[FallbackHypothesis]:
     """Run deterministic pattern detectors over the run's observations.
 
@@ -1656,6 +1659,20 @@ def detect_evidence_patterns(
     :func:`modus.agent.AgentLoop._fallback_proposals`). Detectors
     that match the same observation by different rules each emit
     their own entry — the agent loop's dedup gate handles the rest.
+
+    ``scope_intent`` (issue #40) tags the engagement type. When set
+    to ``"plugin"``, matches against WordPress-core paths are
+    suppressed because they aren't plugin-attributable. Specifically:
+
+    - ``/wp-json/wp/v2/*`` matches drop (WP core REST is core's
+      surface, not the target plugin's).
+    - ``plugin_version_disclosure`` matches drop UNLESS the readme
+      path's slug equals ``plugin_slug`` (every site has
+      akismet/wordfence/jetpack readmes; only the target plugin's
+      readme is the entry point for the CVE-registry escalation).
+
+    Defaults to ``"general"`` (the pre-#40 behaviour) so this
+    addition is backward compatible.
     """
     requested = set(bug_classes) if bug_classes else set(_DETECTORS.keys())
     out: list[FallbackHypothesis] = []
@@ -1663,7 +1680,73 @@ def detect_evidence_patterns(
         if name not in requested:
             continue
         out.extend(detector(observations))
+    if scope_intent == "plugin":
+        out = _suppress_wp_core_fps(out, observations, plugin_slug=plugin_slug)
     return out
+
+
+_WP_CORE_REST_PREFIX = "/wp-json/wp/v2/"
+
+
+def _suppress_wp_core_fps(
+    matches: list[FallbackHypothesis],
+    observations: list[SessionObservation],
+    *,
+    plugin_slug: str | None,
+) -> list[FallbackHypothesis]:
+    """Drop fallback hypotheses that fired on WordPress-core surface
+    in plugin-scope engagements.
+
+    See :func:`detect_evidence_patterns` for the full rule set.
+    Returns a new list — input is not mutated.
+    """
+    # Build observation_id → URL lookup for path-based filtering.
+    url_by_id: dict[str, str] = {}
+    for obs in observations:
+        payload = obs.payload if isinstance(obs.payload, dict) else {}
+        url = payload.get("url")
+        if isinstance(url, str):
+            url_by_id[obs.id] = url
+
+    def _is_wp_core_rest(url: str) -> bool:
+        # "/wp-json/wp/v2/users", "/wp-json/wp/v2/pages", etc. —
+        # core's documented public REST surface.
+        if "://" in url:
+            path = url.split("://", 1)[1].split("/", 1)[-1]
+            path = "/" + path if not path.startswith("/") else path
+        else:
+            path = url
+        path = path.split("?", 1)[0].split("#", 1)[0]
+        return path.startswith(_WP_CORE_REST_PREFIX)
+
+    def _is_target_plugin_readme(url: str) -> bool:
+        if not plugin_slug:
+            return False
+        return f"/wp-content/plugins/{plugin_slug}/readme.txt" in url
+
+    kept: list[FallbackHypothesis] = []
+    for m in matches:
+        ref_urls = [url_by_id.get(ref, "") for ref in m.evidence_refs]
+        # Drop when ALL refs are WP-core REST surface.
+        if ref_urls and all(_is_wp_core_rest(u) for u in ref_urls):
+            continue
+        # Drop plugin_version_disclosure matches on non-target plugins.
+        if (
+            m.detector == "info_disclosure:plugin_version_disclosure"
+            and ref_urls
+            and not any(_is_target_plugin_readme(u) for u in ref_urls)
+        ):
+            continue
+        # Drop plugin_cve_match matches on non-target plugins too —
+        # an Akismet CVE isn't a finding when the target is SJB.
+        if (
+            m.detector.startswith("info_disclosure:plugin_cve_match:")
+            and ref_urls
+            and not any(_is_target_plugin_readme(u) for u in ref_urls)
+        ):
+            continue
+        kept.append(m)
+    return kept
 
 
 __all__ = [

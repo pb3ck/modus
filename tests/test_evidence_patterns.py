@@ -1177,3 +1177,159 @@ class TestDetectEvidencePatterns:
         result = detect_evidence_patterns([obs], ())
         assert len(result) == 1
         assert result[0].bug_class == "info_disclosure"
+
+
+class TestPluginScopeFPSuppression:
+    """Issue #40 — WordPress-core paths are not plugin-attributable and
+    must be suppressed when ``scope_intent='plugin'``.
+    """
+
+    @staticmethod
+    def _obs(obs_id: str, url: str, body: str = "", status: int = 200):
+        from modus.session import SessionObservation
+
+        return SessionObservation(
+            id=obs_id,
+            kind="request",
+            payload={
+                "url": url,
+                "method": "GET",
+                "status": status,
+                "response_body": body,
+                "request_headers": {},
+                "request_body": "",
+            },
+        )
+
+    def test_user_object_dump_suppressed_for_plugin_scope(self) -> None:
+        """``/wp-json/wp/v2/users`` is WordPress-core REST. In a
+        plugin-scope engagement the operator can't ""patch"" core's
+        behaviour; the match shouldn't fire."""
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-wp-users",
+            "http://target.example.com/wp-json/wp/v2/users",
+            body='[{"id":1,"name":"admin","slug":"admin","link":"/author/admin"}]',
+        )
+        # Default scope_intent='general' → match fires.
+        general = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert any(m.detector == "info_disclosure:user_object_dump" for m in general), (
+            "user_object_dump must fire under general scope"
+        )
+        # scope_intent='plugin' → suppressed.
+        plugin = detect_evidence_patterns(
+            [obs],
+            ("info_disclosure",),
+            scope_intent="plugin",
+            plugin_slug="target-plugin",
+        )
+        assert not any(m.detector == "info_disclosure:user_object_dump" for m in plugin), (
+            "user_object_dump must be suppressed under plugin scope"
+        )
+
+    def test_target_plugin_readme_still_fires_for_plugin_scope(self) -> None:
+        """The CVE-registry escalation path depends on reading the
+        TARGET plugin's readme. Plugin-scope suppression must NOT
+        drop the target's own readme match."""
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-readme-target",
+            "http://target.example.com/wp-content/plugins/target-plugin/readme.txt",
+            body=(
+                "=== Target Plugin ===\nContributors: someone\n"
+                "Stable tag: 1.2.3\nRequires PHP: 7.4\n"
+            ),
+        )
+        result = detect_evidence_patterns(
+            [obs],
+            ("info_disclosure",),
+            scope_intent="plugin",
+            plugin_slug="target-plugin",
+        )
+        assert any(
+            m.detector.startswith("info_disclosure:plugin_version_disclosure")
+            or m.detector.startswith("info_disclosure:plugin_cve_match")
+            for m in result
+        ), "target-plugin readme detection must still fire under plugin scope"
+
+    def test_other_plugin_readme_dropped_for_plugin_scope(self) -> None:
+        """Every WordPress install has akismet/wordfence/jetpack
+        readmes. In a plugin-scope engagement targeting one specific
+        plugin, the OTHER plugins' readmes are noise."""
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-readme-akismet",
+            "http://target.example.com/wp-content/plugins/akismet/readme.txt",
+            body=("=== Akismet Anti-Spam ===\nContributors: automattic\nStable tag: 5.3\n"),
+        )
+        # Under general scope, the readme matches.
+        general = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert any("plugin_version_disclosure" in m.detector for m in general)
+        # Under plugin scope targeting a DIFFERENT plugin, dropped.
+        plugin = detect_evidence_patterns(
+            [obs],
+            ("info_disclosure",),
+            scope_intent="plugin",
+            plugin_slug="my-target-plugin",
+        )
+        assert not any("plugin_version_disclosure" in m.detector for m in plugin), (
+            "non-target plugin readme must be suppressed under plugin scope"
+        )
+
+    def test_general_scope_default_is_unchanged(self) -> None:
+        """Regression: the default scope_intent must produce the
+        pre-#40 behaviour exactly."""
+        from modus.evidence_patterns import detect_evidence_patterns
+
+        obs = self._obs(
+            "obs-default",
+            "http://target.example.com/wp-json/wp/v2/users",
+            body='[{"id":1,"name":"admin","slug":"admin","link":"/author/admin"}]',
+        )
+        # Default kwargs (scope_intent="general", plugin_slug=None).
+        result = detect_evidence_patterns([obs], ("info_disclosure",))
+        assert any(m.detector == "info_disclosure:user_object_dump" for m in result), (
+            "default scope must preserve pre-#40 behaviour"
+        )
+
+
+class TestScopeIntentValidation:
+    """ScopePolicy enforces plugin_slug when scope_intent='plugin'."""
+
+    def test_plugin_scope_without_slug_rejected(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        from modus.scope import ScopePolicy
+
+        with pytest.raises(ValidationError, match="plugin_slug"):
+            ScopePolicy(
+                target_name="demo",
+                allowed_assets=frozenset({"target.example.com"}),
+                scope_intent="plugin",
+            )
+
+    def test_plugin_scope_with_slug_accepted(self) -> None:
+        from modus.scope import ScopePolicy
+
+        s = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+            scope_intent="plugin",
+            plugin_slug="my-plugin",
+        )
+        assert s.scope_intent == "plugin"
+        assert s.plugin_slug == "my-plugin"
+
+    def test_general_scope_default(self) -> None:
+        from modus.scope import ScopePolicy
+
+        s = ScopePolicy(
+            target_name="demo",
+            allowed_assets=frozenset({"target.example.com"}),
+        )
+        assert s.scope_intent == "general"
+        assert s.plugin_slug is None
